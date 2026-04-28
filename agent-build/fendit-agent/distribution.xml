@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+    <title>FENDIT Agent</title>
+    
+    <welcome file="welcome.html"/>
+    
+    <domains enable_anywhere="false" enable_localSystem="true" enable_currentUserHome="false"/>
+    <options customize="never" require-scripts="true" hostArchitectures="x86_64,arm64"/>
+    
+    <choices-outline>
+        <line choice="default"/>
+    </choices-outline>
+    
+    <choice id="default" visible="false" title="FENDIT Agent">
+        <pkg-ref id="com.fendit.agent"/>
+    </choice>
+    
+    <pkg-ref id="com.fendit.agent" auth="root">fendit-agent_TEST-DEPLOY.pkg</pkg-ref>
+</installer-gui-script>
