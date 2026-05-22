@@ -23,9 +23,7 @@ jobs:
           cache-dependency-path: fendit-agent/go.sum
 
       - name: Build all targets
-        working-directory: .
         env:
-          # Strip the leading 'v' from the tag (v1.2.3 → 1.2.3) for pkgbuild --version.
           VERSION: ${{ github.ref_name }}
         run: |
           chmod +x build_all.sh
