@@ -3,7 +3,7 @@ module fendit-agent
 go 1.26.3
 
 require (
-	github.com/fsnotify/fsnotify v1.7.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/getlantern/systray v1.2.2
 	github.com/kardianos/service v1.2.2
 )
