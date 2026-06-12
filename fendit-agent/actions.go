@@ -2,17 +2,28 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+)
+
+const (
+	actionPollInterval = 5 * time.Second
+	actionPollJitter   = 500 * time.Millisecond // random spread to avoid thundering herd
+	backoffMin         = 10 * time.Second
+	backoffMax         = 5 * time.Minute
+	maxConcurrentActs  = 3 // semaphore cap for parallel intent execution
 )
 
 // runReflex severs all network adapters immediately, then posts async telemetry.
@@ -92,32 +103,72 @@ func runDNSGuard() {
 	}
 }
 
-// runActionPoller polls /api/control/v1/actions/pending every 5 seconds and
-// executes each intent via the safe ExecutionEngine (no shell eval, fixed arg lists).
-// Runs as a persistent goroutine launched from daemonLoop.
-func runActionPoller(cfg *Config) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+// runActionPoller polls /api/control/v1/actions/pending on a jittered 5-second
+// interval with exponential backoff on errors and a concurrency semaphore to
+// prevent unbounded goroutine accumulation when actions are slow.
+func runActionPoller(ctx context.Context, cfg *Config) {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	sem := make(chan struct{}, maxConcurrentActs)
+	var wg sync.WaitGroup
+	backoff := backoffMin
+
+	defer wg.Wait() // drain in-flight actions before returning
 
 	log.Println("action poller: started")
 
-	for range ticker.C {
+	for {
+		jitter := time.Duration(rng.Int63n(int64(actionPollJitter)))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(actionPollInterval + jitter):
+		}
+
 		intents, err := fetchPendingActions(cfg)
 		if err != nil {
-			log.Printf("action poller: fetch error: %v", err)
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			log.Printf("action poller: fetch error (backoff %s): %v", backoff, err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > backoffMax {
+				backoff = backoffMax
+			}
 			continue
 		}
+		backoff = backoffMin // reset on success
+
 		for _, intent := range intents {
-			log.Printf("action poller: executing %s (id=%s)", intent.Action, intent.ID)
-			result := intent.Execute()
-			if result.Success {
-				log.Printf("action poller: %s succeeded: %s", intent.Action, result.Output)
-			} else {
-				log.Printf("action poller: %s failed: %s", intent.Action, result.Error)
+			select {
+			case sem <- struct{}{}: // acquire concurrency slot
+			case <-ctx.Done():
+				return
 			}
-			if err := postActionResult(cfg, result); err != nil {
-				log.Printf("action poller: result post failed for %s: %v", intent.ID, err)
-			}
+			wg.Add(1)
+			go func(i Intent) {
+				defer func() {
+					<-sem
+					wg.Done()
+					if r := recover(); r != nil {
+						log.Printf("action poller: PANIC on intent %s: %v", i.ID, r)
+					}
+				}()
+				log.Printf("action poller: executing %s (id=%s)", i.Action, i.ID)
+				result := i.Execute()
+				if result.Success {
+					log.Printf("action poller: %s succeeded: %s", i.Action, result.Output)
+				} else {
+					log.Printf("action poller: %s failed: %s", i.Action, result.Error)
+				}
+				if err := postActionResult(cfg, result); err != nil {
+					log.Printf("action poller: result post failed for %s: %v", i.ID, err)
+				}
+			}(intent)
 		}
 	}
 }
@@ -133,8 +184,8 @@ func runActionPoller(cfg *Config) {
 
 // runLocalYaraWatcher starts fsnotify watchers on all user Downloads directories
 // and dispatches YARA checks for any newly created executable-like file.
-// Runs as a persistent goroutine launched from daemonLoop.
-func runLocalYaraWatcher(cfg *Config) {
+// Runs as a persistent goroutine launched from startDaemon.
+func runLocalYaraWatcher(ctx context.Context, cfg *Config) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Printf("yara watcher: init failed: %v", err)
@@ -153,13 +204,15 @@ func runLocalYaraWatcher(cfg *Config) {
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return
 			}
 			// Only react to file creation events for executable-like files.
 			if event.Has(fsnotify.Create) && isExecutableLike(event.Name) {
-				go handleYaraCheck(cfg, event.Name)
+				go handleYaraCheck(ctx, cfg, event.Name)
 			}
 		case err, ok := <-watcher.Errors:
 			if !ok {
@@ -206,7 +259,7 @@ func addDownloadsDirs(watcher *fsnotify.Watcher) {
 
 // handleYaraCheck runs yara against a newly created file and triggers network
 // severance if a rule matches. Called in its own goroutine per file event.
-func handleYaraCheck(cfg *Config, filePath string) {
+func handleYaraCheck(ctx context.Context, cfg *Config, filePath string) {
 	// Give the file writer a moment to finish flushing before we scan.
 	time.Sleep(750 * time.Millisecond)
 
@@ -221,7 +274,7 @@ func handleYaraCheck(cfg *Config, filePath string) {
 		args = []string{"-C", rulesPath, filePath}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "yara", args...).CombinedOutput()
 

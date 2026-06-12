@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,20 @@ import (
 	"runtime"
 	"time"
 )
+
+// agentHTTPClient is the shared transport for all outbound API calls.
+// A single client reuses TCP connections and avoids per-call TLS handshakes.
+// Minimum TLS 1.2 is enforced; TLS 1.3 is preferred automatically by Go's stack.
+var agentHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+	Transport: &http.Transport{
+		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+		MaxIdleConns:        10,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
+		DisableCompression:  false,
+	},
+}
 
 // AgentConfig is the response from /api/control/v1/agent-config.
 type AgentConfig struct {
@@ -40,7 +55,6 @@ func fetchPendingActions(cfg *Config) ([]Intent, error) {
 }
 
 func tryFetchPendingActions(cfg *Config) ([]Intent, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", cfg.endpoint(pathActionsPending), nil)
 	if err != nil {
 		return nil, err
@@ -48,7 +62,7 @@ func tryFetchPendingActions(cfg *Config) ([]Intent, error) {
 	req.Header.Set("Authorization", "Bearer "+cfg.ReflexToken)
 	req.Header.Set("User-Agent", "Fendit-Agent/2.0")
 
-	resp, err := client.Do(req)
+	resp, err := agentHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("actions poll: %w", err)
 	}
@@ -75,7 +89,6 @@ func postActionResult(cfg *Config, result ActionResult) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("POST", cfg.endpoint(pathActionsResult), bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -84,7 +97,7 @@ func postActionResult(cfg *Config, result ActionResult) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Fendit-Agent/2.0")
 
-	resp, err := client.Do(req)
+	resp, err := agentHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("action result post: %w", err)
 	}
@@ -95,8 +108,6 @@ func postActionResult(cfg *Config, result ActionResult) error {
 // fetchAgentConfig calls /api/control/v1/agent-config with the install domain + one-time session token.
 // The server burns the token on first successful call.
 func fetchAgentConfig(domain, sessionToken string) (*AgentConfig, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-
 	req, err := http.NewRequest("GET", defaultAPIBase+pathAgentConfig, nil)
 	if err != nil {
 		return nil, err
@@ -106,7 +117,7 @@ func fetchAgentConfig(domain, sessionToken string) (*AgentConfig, error) {
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
 	req.Header.Set("User-Agent", "Fendit-Agent/2.0")
 
-	resp, err := client.Do(req)
+	resp, err := agentHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("API unreachable: %w", err)
 	}

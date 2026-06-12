@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,10 +32,30 @@ type ActionResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
+// allowedActions is the hard-coded allowlist. Any action not in this set is
+// rejected before it reaches any OS call.
+var allowedActions = map[string]bool{
+	"kill_process":    true,
+	"suspend_process": true,
+	"block_ip":        true,
+	"unblock_ip":      true,
+	"isolate":         true,
+	"unisolate":       true,
+	"quarantine":      true,
+}
+
 // Execute dispatches the intent using OS-native commands.
-// No shell interpreter is invoked — every case calls exec.CommandContext with a fixed
-// argument list, eliminating shell injection entirely.
+// No shell interpreter is ever invoked — every case calls exec.CommandContext
+// with a fixed argument list, eliminating shell injection entirely.
 func (i *Intent) Execute() ActionResult {
+	if !allowedActions[i.Action] {
+		return ActionResult{
+			IntentID: i.ID,
+			Success:  false,
+			Error:    fmt.Sprintf("action %q is not in the allowlist", i.Action),
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), intentExecTimeout)
 	defer cancel()
 
@@ -41,16 +63,24 @@ func (i *Intent) Execute() ActionResult {
 	case "kill_process":
 		cmd, err := buildKillCmd(ctx, i.Args)
 		return i.execCmd(cmd, err)
-	case "isolate":
-		// Reuse the proven severNetwork() path — handles all adapters per-platform.
-		severNetwork()
-		return ActionResult{IntentID: i.ID, Success: true, Output: "network severed"}
-	case "block_ip":
-		cmd, err := buildBlockIPCmd(ctx, i.Args)
-		return i.execCmd(cmd, err)
 	case "suspend_process":
 		cmd, err := buildSuspendCmd(ctx, i.Args)
 		return i.execCmd(cmd, err)
+	case "block_ip":
+		cmd, err := buildBlockIPCmd(ctx, i.Args)
+		return i.execCmd(cmd, err)
+	case "unblock_ip":
+		cmd, err := buildUnblockIPCmd(ctx, i.Args)
+		return i.execCmd(cmd, err)
+	case "isolate":
+		// Firewall-based isolation: blocks all traffic except the Fendit control
+		// plane (TCP 443) and DNS (UDP 53), so the agent can still receive
+		// an unisolate command from the SOC.
+		// NOTE: this is distinct from severNetwork() which is the emergency honeypot
+		// reflex — that one intentionally cuts everything including the control plane.
+		return i.executeIsolate(ctx)
+	case "unisolate":
+		return i.executeUnisolate(ctx)
 	case "quarantine":
 		return i.executeQuarantine()
 	default:
@@ -63,7 +93,7 @@ func (i *Intent) Execute() ActionResult {
 }
 
 // execCmd runs a pre-built command and captures combined stdout/stderr.
-// buildErr is from the builder functions — if it's non-nil the command is never run.
+// buildErr is from the builder functions — if non-nil the command is never run.
 func (i *Intent) execCmd(cmd *exec.Cmd, buildErr error) ActionResult {
 	if buildErr != nil {
 		return ActionResult{IntentID: i.ID, Success: false, Error: buildErr.Error()}
@@ -75,6 +105,8 @@ func (i *Intent) execCmd(cmd *exec.Cmd, buildErr error) ActionResult {
 	}
 	return ActionResult{IntentID: i.ID, Success: true, Output: output}
 }
+
+// ── Argument helpers ──────────────────────────────────────────────────────────
 
 // argStr safely extracts a non-empty string from the intent args map.
 func argStr(args map[string]interface{}, key string) (string, error) {
@@ -89,65 +121,216 @@ func argStr(args map[string]interface{}, key string) (string, error) {
 	return s, nil
 }
 
-func buildKillCmd(ctx context.Context, args map[string]interface{}) (*exec.Cmd, error) {
-	pid, err := argStr(args, "pid")
+// validatedPID extracts "pid" and ensures it is a positive integer.
+func validatedPID(args map[string]interface{}) (string, error) {
+	raw, err := argStr(args, "pid")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	switch runtime.GOOS {
-	case "windows":
-		return exec.CommandContext(ctx, "taskkill.exe", "/F", "/PID", pid), nil
-	default:
-		return exec.CommandContext(ctx, "kill", "-9", pid), nil
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 || n > 4_194_304 {
+		return "", fmt.Errorf("invalid pid %q — must be a positive integer", raw)
 	}
+	return raw, nil
 }
 
-func buildBlockIPCmd(ctx context.Context, args map[string]interface{}) (*exec.Cmd, error) {
-	ip, err := argStr(args, "ip")
+// validatedIP extracts "ip" and ensures it is a valid, non-loopback IP address.
+func validatedIP(args map[string]interface{}) (string, error) {
+	raw, err := argStr(args, "ip")
+	if err != nil {
+		return "", err
+	}
+	ip := net.ParseIP(raw)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP address %q", raw)
+	}
+	if ip.IsLoopback() {
+		return "", fmt.Errorf("refusing to block loopback address %q", raw)
+	}
+	return raw, nil
+}
+
+// sanitizeIPLabel replaces non-alphanumeric characters with dashes so an IP
+// can appear safely in a firewall rule name or routing label.
+func sanitizeIPLabel(ip string) string {
+	out := make([]byte, len(ip))
+	for i, b := range []byte(ip) {
+		if (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') {
+			out[i] = b
+		} else {
+			out[i] = '-'
+		}
+	}
+	return string(out)
+}
+
+// ── Command builders ──────────────────────────────────────────────────────────
+
+func buildKillCmd(ctx context.Context, args map[string]interface{}) (*exec.Cmd, error) {
+	pid, err := validatedPID(args)
 	if err != nil {
 		return nil, err
 	}
 	switch runtime.GOOS {
 	case "windows":
-		// Windows Defender Firewall — fixed arg list, no shell.
+		// /T kills the entire process tree, preventing child processes from surviving.
 		return exec.CommandContext(ctx,
-			"netsh", "advfirewall", "firewall", "add", "rule",
-			"name=FenditBlock-"+ip,
-			"dir=both",
-			"action=block",
-			"remoteip="+ip,
-			"enable=yes",
-			"profile=any",
-		), nil
-	case "darwin":
-		// Null-route via the kernel routing table (no pf rule editing needed).
-		return exec.CommandContext(ctx, "route", "add", "-host", ip, "127.0.0.1"), nil
+			`C:\Windows\System32\taskkill.exe`, "/F", "/T", "/PID", pid), nil
 	default:
-		return exec.CommandContext(ctx, "iptables", "-A", "OUTPUT", "-d", ip, "-j", "DROP"), nil
+		return exec.CommandContext(ctx, "/bin/kill", "-9", pid), nil
 	}
 }
 
 func buildSuspendCmd(ctx context.Context, args map[string]interface{}) (*exec.Cmd, error) {
-	pid, err := argStr(args, "pid")
+	pid, err := validatedPID(args)
 	if err != nil {
 		return nil, err
 	}
 	switch runtime.GOOS {
 	case "windows":
-		// No native Windows CLI for process suspension without extra tooling; kill is the safe fallback.
-		return exec.CommandContext(ctx, "taskkill.exe", "/F", "/PID", pid), nil
+		// No built-in Windows CLI for SIGSTOP-equivalent without extra tooling.
+		// Falling back to kill is the safe production choice.
+		return exec.CommandContext(ctx,
+			`C:\Windows\System32\taskkill.exe`, "/F", "/T", "/PID", pid), nil
 	default:
-		return exec.CommandContext(ctx, "kill", "-STOP", pid), nil
+		return exec.CommandContext(ctx, "/bin/kill", "-STOP", pid), nil
 	}
 }
 
+func buildBlockIPCmd(ctx context.Context, args map[string]interface{}) (*exec.Cmd, error) {
+	ip, err := validatedIP(args)
+	if err != nil {
+		return nil, err
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return exec.CommandContext(ctx,
+			`C:\Windows\System32\netsh.exe`, "advfirewall", "firewall", "add", "rule",
+			"name=FenditBlock-"+sanitizeIPLabel(ip),
+			"dir=both", "action=block", "remoteip="+ip,
+			"enable=yes", "profile=any",
+		), nil
+	case "darwin":
+		// Null-route via the kernel routing table — no pf rule file editing required.
+		return exec.CommandContext(ctx, "/sbin/route", "add", "-host", ip, "127.0.0.1"), nil
+	default:
+		return exec.CommandContext(ctx, "/sbin/iptables", "-A", "OUTPUT", "-d", ip, "-j", "DROP"), nil
+	}
+}
+
+func buildUnblockIPCmd(ctx context.Context, args map[string]interface{}) (*exec.Cmd, error) {
+	ip, err := validatedIP(args)
+	if err != nil {
+		return nil, err
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return exec.CommandContext(ctx,
+			`C:\Windows\System32\netsh.exe`, "advfirewall", "firewall", "delete", "rule",
+			"name=FenditBlock-"+sanitizeIPLabel(ip),
+		), nil
+	case "darwin":
+		return exec.CommandContext(ctx, "/sbin/route", "delete", "-host", ip), nil
+	default:
+		return exec.CommandContext(ctx, "/sbin/iptables", "-D", "OUTPUT", "-d", ip, "-j", "DROP"), nil
+	}
+}
+
+// ── Isolate / unisolate ───────────────────────────────────────────────────────
+
+// executeIsolate uses the platform firewall to block all traffic except
+// outbound DNS (UDP 53) and the Fendit control plane (TCP 443).
+// The agent remains reachable by the SOC and can receive an unisolate command.
+func (i *Intent) executeIsolate(ctx context.Context) ActionResult {
+	var cmds [][]string
+	switch runtime.GOOS {
+	case "windows":
+		cmds = [][]string{
+			// 1. Block all inbound and outbound by default.
+			{`C:\Windows\System32\netsh.exe`, "advfirewall", "set", "allprofiles",
+				"firewallpolicy", "blockinbound,blockoutbound"},
+			// 2. Allow outbound DNS so we can resolve api.fendit.eu.
+			{`C:\Windows\System32\netsh.exe`, "advfirewall", "firewall", "add", "rule",
+				"name=FENDIT-ISO-DNS", "dir=out", "action=allow",
+				"protocol=UDP", "remoteport=53", "enable=yes", "profile=any"},
+			// 3. Allow outbound HTTPS to the Fendit control plane.
+			{`C:\Windows\System32\netsh.exe`, "advfirewall", "firewall", "add", "rule",
+				"name=FENDIT-ISO-CTRL", "dir=out", "action=allow",
+				"protocol=TCP", "remoteport=443", "enable=yes", "profile=any"},
+		}
+	case "darwin":
+		// Write a pfctl anchor that blocks everything except DNS + control plane.
+		rules := "block drop all\n" +
+			"pass out proto udp to any port 53\n" +
+			"pass out proto tcp to any port 443\n"
+		anchorFile := "/etc/pf.anchors/fendit-isolate"
+		if err := os.WriteFile(anchorFile, []byte(rules), 0600); err != nil {
+			return ActionResult{IntentID: i.ID, Success: false, Error: err.Error()}
+		}
+		cmds = [][]string{
+			{"/sbin/pfctl", "-a", "fendit/isolate", "-f", anchorFile},
+		}
+	}
+	return i.runSequential(ctx, cmds)
+}
+
+// executeUnisolate removes the isolation firewall rules applied by executeIsolate.
+func (i *Intent) executeUnisolate(ctx context.Context) ActionResult {
+	var cmds [][]string
+	switch runtime.GOOS {
+	case "windows":
+		cmds = [][]string{
+			{`C:\Windows\System32\netsh.exe`, "advfirewall", "firewall", "delete", "rule",
+				"name=FENDIT-ISO-DNS"},
+			{`C:\Windows\System32\netsh.exe`, "advfirewall", "firewall", "delete", "rule",
+				"name=FENDIT-ISO-CTRL"},
+			// Restore to default-allow-outbound policy.
+			{`C:\Windows\System32\netsh.exe`, "advfirewall", "set", "allprofiles",
+				"firewallpolicy", "blockinbound,allowoutbound"},
+		}
+	case "darwin":
+		cmds = [][]string{
+			{"/sbin/pfctl", "-a", "fendit/isolate", "-F", "rules"},
+		}
+	}
+	return i.runSequential(ctx, cmds)
+}
+
+// runSequential executes a list of commands in order, stopping on first error.
+// Combined output of all commands is joined into the result's Output field.
+func (i *Intent) runSequential(ctx context.Context, cmds [][]string) ActionResult {
+	var allOut []byte
+	for _, args := range cmds {
+		out, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+		allOut = append(allOut, out...)
+		if err != nil {
+			return ActionResult{
+				IntentID: i.ID,
+				Success:  false,
+				Output:   strings.TrimSpace(string(allOut)),
+				Error:    err.Error(),
+			}
+		}
+	}
+	return ActionResult{
+		IntentID: i.ID,
+		Success:  true,
+		Output:   strings.TrimSpace(string(allOut)),
+	}
+}
+
+// ── Quarantine ────────────────────────────────────────────────────────────────
+
 // executeQuarantine moves a file to the platform quarantine directory and strips
 // all permissions so it cannot be executed or read without elevated rights.
-// Uses os.Rename (no exec) for the move, then a native permission command.
 func (i *Intent) executeQuarantine() ActionResult {
 	src, err := argStr(i.Args, "filepath")
 	if err != nil {
 		return ActionResult{IntentID: i.ID, Success: false, Error: err.Error()}
+	}
+	// Reject traversal attempts before any filesystem operation.
+	if strings.Contains(src, "..") || strings.ContainsRune(src, 0) {
+		return ActionResult{IntentID: i.ID, Success: false, Error: "invalid filepath"}
 	}
 
 	qDir := quarantineDir()
@@ -172,10 +355,10 @@ func (i *Intent) executeQuarantine() ActionResult {
 	var permCmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		// Deny everyone read+execute access via icacls.
-		permCmd = exec.CommandContext(ctx, "icacls", dst, "/deny", "Everyone:(RX)")
+		permCmd = exec.CommandContext(ctx,
+			`C:\Windows\System32\icacls.exe`, dst, "/deny", "Everyone:(RX)")
 	default:
-		permCmd = exec.CommandContext(ctx, "chmod", "000", dst)
+		permCmd = exec.CommandContext(ctx, "/bin/chmod", "000", dst)
 	}
 	permOut, _ := permCmd.CombinedOutput()
 

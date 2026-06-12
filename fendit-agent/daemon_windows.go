@@ -8,20 +8,26 @@ import (
 	"github.com/kardianos/service"
 )
 
-// program satisfies service.Interface for Windows Service Control Manager.
+// program satisfies service.Interface for the Windows Service Control Manager.
 type program struct{}
 
 func (p *program) Start(_ service.Service) error {
-	go daemonLoop()
+	go startDaemon()
 	return nil
 }
 
+// Stop is called by the SCM when the service is being stopped.
+// It cancels the shared context so all goroutines in startDaemon drain cleanly.
+// The SCM grants a default 30-second window before killing the process.
 func (p *program) Stop(_ service.Service) error {
-	log.Println("Fendit daemon stopping")
+	log.Println("daemon: Stop called by SCM — draining goroutines")
+	if cancelDaemon != nil {
+		cancelDaemon()
+	}
 	return nil
 }
 
-// runDaemon is called when the binary is invoked by the Windows SCM.
+// runDaemon is called by main when the binary is invoked by the Windows SCM.
 func runDaemon() {
 	svcConfig := &service.Config{
 		Name:        "FenditAgent",
