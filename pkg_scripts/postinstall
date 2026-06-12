@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Veiligheidshalve stoppen bij fouten
+set -e
+
+PLIST_PATH="/Library/LaunchDaemons/eu.fendit.agent.plist"
+BINARY_PATH="/usr/local/bin/fendit-agent"
+
+echo "Fendit Post-Install: Rechten rechttrekken..."
+
+# 1. Zorg dat de binary executable is
+if [ -f "$BINARY_PATH" ]; then
+    chmod +x "$BINARY_PATH"
+fi
+
+# 2. Fix de rechten van de plist (macOS Launchd eist root:wheel en 644)
+if [ -f "$PLIST_PATH" ]; then
+    chown root:wheel "$PLIST_PATH"
+    chmod 644 "$PLIST_PATH"
+
+    echo "Fendit Post-Install: LaunchDaemon registreren en starten..."
+
+    # 3. Laad en start de service direct zonder herstart (moderne launchctl bootstrap)
+    # We gebruiken || true zodat het script niet crasht als de service al geladen was
+    launchctl bootstrap system "$PLIST_PATH" 2>/dev/null || true
+    launchctl kickstart -k system/eu.fendit.agent 2>/dev/null || true
+fi
+
+echo "Fendit Post-Install: Succesvol afgerond!"
+exit 0
