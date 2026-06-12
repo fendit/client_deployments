@@ -21,8 +21,25 @@ type AgentConfig struct {
 }
 
 // fetchPendingActions retrieves 'approved' action intents for this agent from guardian.
+// Retries up to 3 times with 2 s backoff on transient network errors.
 // Returns an empty slice (not an error) when there is nothing to execute.
 func fetchPendingActions(cfg *Config) ([]Intent, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*2) * time.Second)
+		}
+		intents, err := tryFetchPendingActions(cfg)
+		if err == nil {
+			return intents, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func tryFetchPendingActions(cfg *Config) ([]Intent, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", cfg.endpoint(pathActionsPending), nil)
 	if err != nil {

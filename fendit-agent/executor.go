@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const intentExecTimeout = 10 * time.Second
+const intentExecTimeout = 30 * time.Second
 
 // Intent is a structured action received from the /v1/actions/pending endpoint.
 // All fields map 1-to-1 with the action_intents PostgreSQL table columns.

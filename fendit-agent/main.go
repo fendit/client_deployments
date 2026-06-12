@@ -3,17 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
 func main() {
-	trayMode := flag.Bool("tray", false, "Run in system tray mode")
-	reflexTrigger := flag.String("reflex", "", "Fire a local reflex (honeypot)")
-	dnsGuard := flag.Bool("dns-guard", false, "Re-apply DNS sinkhole settings")
-	installDomain := flag.String("install-domain", "", "Domain slug (set by macOS postinstall)")
-	installToken := flag.String("install-token", "", "One-time install token (set by macOS postinstall)")
+	trayMode     := flag.Bool("tray",      false, "Run in system tray mode")
+	reflexTrigger := flag.String("reflex", "",    "Fire a local reflex (honeypot)")
+	dnsGuard     := flag.Bool("dns-guard", false, "Re-apply DNS sinkhole settings")
 	flag.Parse()
 
 	switch {
@@ -26,58 +24,49 @@ func main() {
 	case *dnsGuard:
 		runDNSGuard()
 
-	case *installDomain != "" && *installToken != "":
-		// Explicit flags — macOS PKG postinstall calls us this way.
-		if err := install(*installDomain, *installToken); err != nil {
-			fatalDialog("Fendit Setup Error", err.Error())
-			os.Exit(1)
-		}
-
-	case configExists():
-		// Config already on disk → this is a daemon/service invocation.
-		runDaemon()
-
-	default:
-		// No config yet → parse own filename to get domain + token.
-		// This path is hit when the user double-clicks the renamed .exe on Windows.
-		domain, token, err := parseInstallTarget()
+	case len(flag.Args()) > 0 && strings.HasPrefix(flag.Args()[0], "fendit://"):
+		// Deep-link invocation — OS passes the URL as the first positional argument.
+		// macOS: launched by LaunchServices when user clicks fendit:// link.
+		// Windows: launched by the shell handler registered in HKEY_CLASSES_ROOT\fendit.
+		// Expected format: fendit://onboard?domain=<domain>&session=<token>
+		domain, session, err := parseDeepLink(flag.Args()[0])
 		if err != nil {
 			fatalDialog("Fendit Setup Error", err.Error())
 			os.Exit(1)
 		}
-		if err := install(domain, token); err != nil {
+		if err := install(domain, session); err != nil {
 			fatalDialog("Fendit Setup Error", fmt.Sprintf("Installation failed: %v", err))
 			os.Exit(1)
 		}
+
+	case configExists():
+		// Config already on disk — daemon/service invocation.
+		runDaemon()
+
+	default:
+		fatalDialog("Fendit Setup", "Open the Fendit customer portal to start the installation.")
+		os.Exit(1)
 	}
 }
 
-// parseInstallTarget reads the binary's own filename to extract domain + session token.
-// Expected format: fendit_setup_<domain_slug>_<session_id>[.ext]
-// Uses LastIndex so domain slugs with underscores (e.g. "co_uk") parse correctly.
-func parseInstallTarget() (domain, token string, err error) {
-	exe, err := os.Executable()
+// parseDeepLink extracts domain and session from a fendit:// deep-link URL.
+// Expected format: fendit://onboard?domain=<domain>&session=<token>
+func parseDeepLink(rawURL string) (domain, session string, err error) {
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", "", fmt.Errorf("cannot resolve executable path: %w", err)
+		return "", "", fmt.Errorf("invalid deep-link URL: %w", err)
 	}
-	base := filepath.Base(exe)
-	base = strings.TrimSuffix(base, filepath.Ext(base))
-	base = strings.ToLower(base)
-
-	const prefix = "fendit_setup_"
-	if !strings.HasPrefix(base, prefix) {
-		return "", "", fmt.Errorf(
-			"this file must be named fendit_setup_<domain>_<token> — re-download from the portal")
+	if u.Scheme != "fendit" {
+		return "", "", fmt.Errorf("unexpected URL scheme %q — expected fendit://", u.Scheme)
 	}
-	rest := base[len(prefix):]
-	idx := strings.LastIndex(rest, "_")
-	if idx < 1 || idx == len(rest)-1 {
-		return "", "", fmt.Errorf("cannot find domain/token separator — re-download from the portal")
+	q := u.Query()
+	domain = q.Get("domain")
+	session = q.Get("session")
+	if domain == "" {
+		return "", "", fmt.Errorf("deep-link is missing the 'domain' parameter — re-open from the portal")
 	}
-	domain = rest[:idx]
-	token = rest[idx+1:]
-	if len(token) < 8 {
-		return "", "", fmt.Errorf("token is too short — re-download from the portal")
+	if len(session) < 8 {
+		return "", "", fmt.Errorf("deep-link has an invalid 'session' parameter — re-open from the portal")
 	}
-	return domain, token, nil
+	return domain, session, nil
 }

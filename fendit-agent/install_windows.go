@@ -91,6 +91,11 @@ func install(domain, sessionToken string) error {
 		return fmt.Errorf("install self: %w", err)
 	}
 
+	// 6a. Register fendit:// protocol handler so the portal deep-link works on this machine.
+	if err := registerProtocolHandler(); err != nil {
+		fmt.Printf("[!] Protocol handler registration failed (niet-fataal): %v\n", err)
+	}
+
 	// 7. Start Wazuh service (telemetry ingest only — no active-response scripts deployed).
 	exec.Command("sc.exe", "start", wazuhSvcName).Run() //nolint:errcheck
 
@@ -201,6 +206,28 @@ func installSelf() error {
 			`-Name 'FenditTray' -Value '"%s" --tray'`, agentBinDst)
 	exec.Command("powershell", "-NonInteractive", "-Command", regScript).Run() //nolint:errcheck
 	exec.Command(agentBinDst, "--tray").Start()                                //nolint:errcheck
+	return nil
+}
+
+// registerProtocolHandler writes the HKEY_CLASSES_ROOT\fendit registry keys that
+// tell Windows to invoke this binary with the URL as "%1" when a fendit:// link
+// is clicked.  Must run after installSelf() so agentBinDst already exists.
+func registerProtocolHandler() error {
+	base := `HKEY_CLASSES_ROOT\fendit`
+	openCmd := fmt.Sprintf(`"%s" "%%1"`, agentBinDst)
+
+	// reg.exe creates intermediate keys automatically, so shell\open\command
+	// in one call is sufficient; we add the root keys explicitly for clarity.
+	cmds := [][]string{
+		{"reg", "add", base, "/ve", "/d", "URL:Fendit Protocol", "/f"},
+		{"reg", "add", base, "/v", "URL Protocol", "/d", "", "/f"},
+		{"reg", "add", base + `\shell\open\command`, "/ve", "/d", openCmd, "/f"},
+	}
+	for _, args := range cmds {
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			return fmt.Errorf("reg add %q: %w\n%s", args[2], err, out)
+		}
+	}
 	return nil
 }
 
