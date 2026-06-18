@@ -22,45 +22,39 @@ const (
 )
 
 // install runs the full macOS onboarding sequence.
-// Called by the PKG postinstall script (--install-domain / --install-token flags).
-func install(domain, sessionToken string) error {
+// act is the response from POST /api/v1/agent/activate — all credentials are
+// already resolved; no network call is made from within install().
+func install(act *ActivateResponse) error {
 	fmt.Println("[*] Fendit onboarding gestart...")
 
-	// 1. Fetch config — burns the one-time token.
-	cfg, err := fetchAgentConfig(domain, sessionToken)
-	if err != nil {
-		return fmt.Errorf("fetch config: %w", err)
-	}
-	apiBase := cfg.APIBaseURL
+	apiBase := act.APIBase
 	if apiBase == "" {
 		apiBase = defaultAPIBase
 	}
 
-	// 2. Download Wazuh package.
+	// 1. Download Wazuh package.
 	wazuhPkg := "/tmp/fendit_agent.pkg"
-	fmt.Printf("[*] Downloaden Fendit Agent van %s...\n", cfg.AgentURL)
-	if err := downloadFile(wazuhPkg, cfg.AgentURL); err != nil {
+	fmt.Printf("[*] Downloaden Fendit Agent van %s...\n", act.AgentURL)
+	if err := downloadFile(wazuhPkg, act.AgentURL); err != nil {
 		return fmt.Errorf("download wazuh: %w", err)
 	}
 	defer os.Remove(wazuhPkg)
 
-	// 3. Base install — no WAZUH_MANAGER or WAZUH_AGENT_GROUP env vars.
-	//    We register separately via agent-auth so credentials are never passed
-	//    as environment variables to an installer process.
+	// 2. Base install — credentials are never passed as env/CLI args to the
+	//    installer; agent-auth handles secure Wazuh manager registration below.
 	fmt.Println("[*] Starten basisinstallatie...")
 	if out, err := exec.Command("/usr/sbin/installer", "-pkg", wazuhPkg, "-target", "/").
 		CombinedOutput(); err != nil {
 		return fmt.Errorf("wazuh install: %w\n%s", err, out)
 	}
 
-	// 3a. Register the agent with the Wazuh manager via agent-auth.
-	//     This is the secure registration path — no credentials in env/CLI args.
-	if cfg.WazuhManager != "" {
+	// 2a. Register the agent with the Wazuh manager via agent-auth.
+	if act.WazuhManager != "" {
 		fmt.Printf("[*] Registreren bij Wazuh manager %s (groep: %s)...\n",
-			cfg.WazuhManager, cfg.InstallGroup)
-		authArgs := []string{"-m", cfg.WazuhManager}
-		if cfg.InstallGroup != "" {
-			authArgs = append(authArgs, "-G", cfg.InstallGroup)
+			act.WazuhManager, act.InstallGroup)
+		authArgs := []string{"-m", act.WazuhManager}
+		if act.InstallGroup != "" {
+			authArgs = append(authArgs, "-G", act.InstallGroup)
 		}
 		if out, err := exec.Command(wazuhAuthBin, authArgs...).CombinedOutput(); err != nil {
 			fmt.Printf("[!] agent-auth mislukt (niet-fataal): %v\n%s\n", err, out)
@@ -69,14 +63,14 @@ func install(domain, sessionToken string) error {
 		}
 	}
 
-	// 4. Save encrypted config.
+	// 3. Save encrypted config.
 	if err := os.MkdirAll(filepath.Join(fenditDir, "config"), 0700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	if err := saveConfig(&Config{
-		ReflexToken: cfg.ReflexToken,
+		ReflexToken: act.AgentToken,
 		APIBase:     apiBase,
-		OrgName:     domain,
+		OrgName:     act.OrganizationName,
 	}); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}

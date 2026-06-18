@@ -17,25 +17,68 @@ import (
 var agentHTTPClient = &http.Client{
 	Timeout: 15 * time.Second,
 	Transport: &http.Transport{
-		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
-		MaxIdleConns:        10,
-		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
-		DisableCompression:  false,
+		TLSClientConfig:    &tls.Config{MinVersion: tls.VersionTLS12},
+		MaxIdleConns:       10,
+		IdleConnTimeout:    90 * time.Second,
+		ForceAttemptHTTP2:  true,
+		DisableCompression: false,
 	},
 }
 
-// AgentConfig is the response from /api/control/v1/agent-config.
-type AgentConfig struct {
-	WazuhManager string `json:"agent_wazuh_manager"`
-	AgentURL     string `json:"agent_url"`
-	InstallGroup string `json:"install_group"`
-	MCPDnsIP     string `json:"mcp_dns_ip"`
-	ReflexToken  string `json:"reflex_token"`
-	APIBaseURL   string `json:"api_base_url"`
+// ActivateResponse is the response from POST /api/v1/agent/activate.
+// Fields map 1:1 to what the Go agent needs for Wazuh install + config persistence.
+type ActivateResponse struct {
+	AgentToken       string `json:"agent_token"`
+	OrganizationName string `json:"organization_name"`
+	WazuhManager     string `json:"agent_wazuh_manager"`
+	InstallGroup     string `json:"install_group"`
+	AgentURL         string `json:"agent_url"`
+	APIBase          string `json:"api_base_url"`
 }
 
-// fetchPendingActions retrieves 'approved' action intents for this agent from guardian.
+// activateAgent sends the 6-character code to Guardian and, on success, returns
+// the persistent ActivateResponse the agent uses to install Wazuh and store config.
+// GOOS and GOARCH are passed so Guardian can return the correct Wazuh package URL.
+func activateAgent(code, hostname string) (*ActivateResponse, error) {
+	body, err := json.Marshal(map[string]string{
+		"code":     code,
+		"hostname": hostname,
+		"os":       runtime.GOOS,
+		"arch":     runtime.GOARCH,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", defaultAPIBase+pathActivate, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Fendit-Agent/2.0")
+
+	resp, err := agentHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("activation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("activation failed (%d): %s", resp.StatusCode, raw)
+	}
+
+	var act ActivateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&act); err != nil {
+		return nil, fmt.Errorf("decode activation response: %w", err)
+	}
+	if act.AgentToken == "" {
+		return nil, fmt.Errorf("server returned empty agent token")
+	}
+	return &act, nil
+}
+
+// fetchPendingActions retrieves 'approved' action intents for this agent from Guardian.
 // Retries up to 3 times with 2 s backoff on transient network errors.
 // Returns an empty slice (not an error) when there is nothing to execute.
 func fetchPendingActions(cfg *Config) ([]Intent, error) {
@@ -83,7 +126,7 @@ func tryFetchPendingActions(cfg *Config) ([]Intent, error) {
 	return intents, nil
 }
 
-// postActionResult sends execution feedback to guardian after the ExecutionEngine finishes.
+// postActionResult sends execution feedback to Guardian after the ExecutionEngine finishes.
 func postActionResult(cfg *Config, result ActionResult) error {
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -103,37 +146,4 @@ func postActionResult(cfg *Config, result ActionResult) error {
 	}
 	resp.Body.Close()
 	return nil
-}
-
-// fetchAgentConfig calls /api/control/v1/agent-config with the install domain + one-time session token.
-// The server burns the token on first successful call.
-func fetchAgentConfig(domain, sessionToken string) (*AgentConfig, error) {
-	req, err := http.NewRequest("GET", defaultAPIBase+pathAgentConfig, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("x-install-domain", domain)
-	req.Header.Set("x-install-arch", runtime.GOARCH)
-	req.Header.Set("Authorization", "Bearer "+sessionToken)
-	req.Header.Set("User-Agent", "Fendit-Agent/2.0")
-
-	resp, err := agentHTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("API unreachable: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, body)
-	}
-
-	var cfg AgentConfig
-	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	if cfg.ReflexToken == "" || cfg.WazuhManager == "" {
-		return nil, fmt.Errorf("API response missing required fields (reflex_token / agent_wazuh_manager)")
-	}
-	return &cfg, nil
 }
