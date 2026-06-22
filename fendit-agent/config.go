@@ -21,7 +21,7 @@ const (
 	pathActivate       = "/api/v1/agent/activate"           // activation-code handshake (universal installer)
 	pathReflex         = "/api/control/v1/reflex"
 	pathScanHash       = "/api/control/v1/scan-hash"
-	pathHealth         = "/api/control/health"
+	pathHealth         = "/health"
 	pathActionsPending = "/api/control/v1/actions/pending"  // polled every 5 s by runActionPoller
 	pathActionsResult  = "/api/control/v1/actions/result"   // execution feedback from ExecutionEngine
 )

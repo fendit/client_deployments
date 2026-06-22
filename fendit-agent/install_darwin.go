@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 const (
@@ -96,9 +97,10 @@ func install(act *ActivateResponse) error {
 	return nil
 }
 
-// downloadFile streams url to dst path.
+// downloadFile streams url to dst path using a long timeout for large packages.
 func downloadFile(dst, url string) error {
-	resp, err := http.Get(url) //nolint:gosec
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Get(url) //nolint:gosec
 	if err != nil {
 		return err
 	}
