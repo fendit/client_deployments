@@ -1,0 +1,23 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "FenditInstaller",
+  "outputfilename": "fendit-installer",
+  "frontend": {
+    "dir": "frontend",
+    "install": "",
+    "build": "",
+    "dev": "",
+    "devUrl": "http://localhost:3000"
+  },
+  "author": {
+    "name": "Fendit BV",
+    "email": "hello@fendit.eu"
+  },
+  "info": {
+    "companyName": "Fendit BV",
+    "productName": "Fendit Security",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © Fendit BV",
+    "comments": "Endpoint Protection Platform"
+  }
+}
