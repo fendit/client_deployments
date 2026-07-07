@@ -81,9 +81,9 @@ func runActivationSetup() {
 	const maxAttempts = 3
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		code := inputDialog(
-			"Fendit Activatie",
-			"Voer uw 6-tekens activatiecode in.\n\n"+
-				"Genereer een code via portal.fendit.eu → Apparaten → Apparaat Toevoegen.",
+			"Fendit Activation",
+			"Enter your 6-character activation code.\n\n"+
+				"Generate a code at portal.fendit.eu → Devices → Add Device.",
 		)
 		code = strings.TrimSpace(strings.ToUpper(code))
 
@@ -94,9 +94,9 @@ func runActivationSetup() {
 
 		if len(code) != 6 {
 			fatalDialog(
-				"Ongeldige activatiecode",
-				"Een activatiecode bestaat uit precies 6 tekens.\n"+
-					"Controleer de code in het Fendit portaal en probeer opnieuw.",
+				"Invalid activation code",
+				"An activation code is exactly 6 characters.\n"+
+					"Check the code in the Fendit portal and try again.",
 			)
 			continue
 		}
@@ -104,10 +104,10 @@ func runActivationSetup() {
 		act, err := activateAgent(code, hostname)
 		if err != nil {
 			fatalDialog(
-				"Activatie Mislukt",
+				"Activation Failed",
 				fmt.Sprintf(
-					"Kon het apparaat niet activeren.\n\nFout: %v\n\n"+
-						"Genereer een nieuwe code via portal.fendit.eu en probeer opnieuw.",
+					"Could not activate this device.\n\nError: %v\n\n"+
+						"Generate a new code at portal.fendit.eu and try again.",
 					err,
 				),
 			)
@@ -116,10 +116,10 @@ func runActivationSetup() {
 
 		if err := install(act); err != nil {
 			fatalDialog(
-				"Fendit Installatie Mislukt",
+				"Fendit Installation Failed",
 				fmt.Sprintf(
-					"Installatie kon niet worden voltooid.\n\nFout: %v\n\n"+
-						"Neem contact op met support@fendit.eu",
+					"Installation could not be completed.\n\nError: %v\n\n"+
+						"Contact support@fendit.eu for assistance.",
 					err,
 				),
 			)
@@ -129,9 +129,9 @@ func runActivationSetup() {
 	}
 
 	fatalDialog(
-		"Te veel pogingen",
-		"Het maximum aantal activatiepogingen is bereikt.\n"+
-			"Start het installatieprogramma opnieuw.",
+		"Too many attempts",
+		"The maximum number of activation attempts has been reached.\n"+
+			"Please restart the installer.",
 	)
 	os.Exit(1)
 }

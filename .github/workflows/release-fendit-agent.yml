@@ -1,4 +1,4 @@
-name: Release Fendit Agent
+name: Release Fendit
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-latest
+    runs-on: macos-14  # arm64 runner — matches the darwin/arm64 target in build_all.sh
 
     steps:
       - name: Checkout
@@ -21,6 +21,16 @@ jobs:
         with:
           go-version-file: fendit-agent/go.mod
           cache-dependency-path: fendit-agent/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: fendit-installer/frontend/package-lock.json
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.9.2
 
       - name: Build all targets
         env:

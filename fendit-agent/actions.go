@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,81 +25,65 @@ const (
 	maxConcurrentActs  = 3 // semaphore cap for parallel intent execution
 )
 
-// runReflex severs all network adapters immediately, then posts async telemetry.
-// Called by launchd WatchPaths (macOS) or PowerShell FileSystemWatcher (Windows)
-// when the honeypot directory is touched.
-func runReflex(triggerType string) {
-	cfg, err := loadConfig()
-	if err != nil {
-		log.Printf("reflex: cannot load config: %v", err)
-		// Still sever the network even if config is unreadable.
-	}
+// runReflex is the CLI entry point for the --reflex flag, used when launchd
+// WatchPaths (macOS) invokes the binary with "--reflex honeypot" on file-system
+// activity. The trigger string is kept for future extensibility.
+func runReflex(_ string) {
+	cfg, _ := loadConfig() // nil cfg is handled gracefully by triggerHoneypotReflex
+	triggerHoneypotReflex(cfg)
+}
 
+// triggerHoneypotReflex is the Code Red response to a confirmed honeypot access.
+// It applies smart firewall isolation (all traffic blocked except outbound TCP 443)
+// and then immediately sends telemetry to Guardian over the preserved control plane.
+// smartIsolate() is defined per-platform in network_windows.go / network_darwin.go.
+func triggerHoneypotReflex(cfg *Config) {
 	host, _ := os.Hostname()
 	ts := time.Now().UTC().Format(time.RFC3339)
+	log.Printf("HONEYPOT REFLEX: triggered on %s at %s — activating smart isolation", host, ts)
 
-	severNetwork()
-	log.Printf("REFLEX: %s triggered — network severed on %s at %s", triggerType, host, ts)
+	smartIsolate()
 
 	if cfg == nil {
 		return
 	}
-	go func() {
-		body := fmt.Sprintf(`{"trigger":%q,"host":%q,"ts":%q}`, triggerType, host, ts)
-		req, err := http.NewRequest("POST", cfg.endpoint(pathReflex), strings.NewReader(body))
-		if err != nil {
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+cfg.ReflexToken)
-		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Do(req)
-		if err == nil {
-			resp.Body.Close()
-		}
-	}()
-	time.Sleep(3 * time.Second)
+	postReflexTelemetry(cfg, fmt.Sprintf(
+		`{"trigger":"honeypot","host":%q,"ts":%q}`,
+		host, ts,
+	))
 }
 
-// severNetwork kills all active network adapters instantly.
-func severNetwork() {
-	switch runtime.GOOS {
-	case "darwin":
-		out, _ := exec.Command("networksetup", "-listallnetworkservices").Output()
-		for _, svc := range strings.Split(string(out), "\n")[1:] {
-			svc = strings.TrimSpace(svc)
-			if svc != "" {
-				exec.Command("networksetup", "-setnetworkserviceenabled", svc, "off").Run() //nolint:errcheck
-			}
-		}
-	case "windows":
-		exec.Command("powershell", "-NonInteractive", "-Command",
-			`Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Disable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue`).Run() //nolint:errcheck
+// quarantineMatchedFile moves a YARA-matched file to the quarantine directory and
+// locks it to SYSTEM-only access. The caller's network connection is not affected,
+// so telemetry can be sent immediately after this call returns.
+//
+// The rename is retried every 100 ms for up to 2 s to handle the race where the
+// OS holds an execution lock (ERROR_SHARING_VIOLATION / EBUSY) because the user
+// double-clicked the file before the watcher fired.
+func quarantineMatchedFile(path string) error {
+	qDir := quarantineDir()
+	if err := os.MkdirAll(qDir, 0700); err != nil {
+		return fmt.Errorf("create quarantine dir: %w", err)
 	}
-}
+	dst := filepath.Join(qDir, filepath.Base(path))
 
-// runDNSGuard re-applies the sinkhole DNS to all adapters.
-func runDNSGuard() {
-	cfg, err := loadConfig()
-	if err != nil || cfg.MCPDnsIP == "" {
-		return
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		out, _ := exec.Command("networksetup", "-listallnetworkservices").Output()
-		for _, svc := range strings.Split(string(out), "\n")[1:] {
-			svc = strings.TrimSpace(svc)
-			if svc != "" {
-				exec.Command("networksetup", "-setdnsservers", svc, cfg.MCPDnsIP).Run() //nolint:errcheck
-			}
+	var moveErr error
+	deadline := time.Now().Add(2 * time.Second)
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
+		if moveErr = os.Rename(path, dst); moveErr == nil {
+			break
 		}
-	case "windows":
-		script := fmt.Sprintf(
-			`Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -ServerAddresses '%s' -ErrorAction SilentlyContinue }`,
-			cfg.MCPDnsIP,
-		)
-		exec.Command("powershell", "-NonInteractive", "-Command", script).Run() //nolint:errcheck
+		log.Printf("yara: quarantine rename attempt %d failed (retrying): %v", attempt, moveErr)
+		time.Sleep(100 * time.Millisecond)
 	}
+	if moveErr != nil {
+		return fmt.Errorf("move to quarantine (gave up after 2s): %w", moveErr)
+	}
+
+	if err := lockFilePermissions(dst); err != nil {
+		return fmt.Errorf("lock permissions: %w", err)
+	}
+	return nil
 }
 
 // runActionPoller polls /api/control/v1/actions/pending on a jittered 5-second
@@ -193,7 +176,7 @@ func runLocalYaraWatcher(ctx context.Context, cfg *Config) {
 	}
 	defer watcher.Close()
 
-	addDownloadsDirs(watcher)
+	addWatchDirs(watcher)
 
 	if len(watcher.WatchList()) == 0 {
 		log.Println("yara watcher: no Downloads directories found — watcher idle")
@@ -223,12 +206,20 @@ func runLocalYaraWatcher(ctx context.Context, cfg *Config) {
 	}
 }
 
-// addDownloadsDirs enumerates user home directories and watches their Downloads folder.
-func addDownloadsDirs(watcher *fsnotify.Watcher) {
+// addWatchDirs enumerates per-user and system drop zones known to be used by
+// phishing payloads and browser-triggered downloads, and registers each with
+// the fsnotify watcher. Only the directory itself is watched (not recursive);
+// fsnotify.Create events fire for any new file written directly inside.
+func addWatchDirs(watcher *fsnotify.Watcher) {
 	usersRoot := "/Users"
+	sysTmp := "/tmp"
 	if runtime.GOOS == "windows" {
 		usersRoot = `C:\Users`
+		sysTmp = `C:\Windows\Temp`
 	}
+
+	// System-wide temp — common landing zone for msiexec droppers and loaders.
+	watchOne(watcher, sysTmp)
 
 	entries, err := os.ReadDir(usersRoot)
 	if err != nil {
@@ -241,19 +232,45 @@ func addDownloadsDirs(watcher *fsnotify.Watcher) {
 			continue
 		}
 		name := entry.Name()
-		// Skip hidden dirs and well-known system accounts.
 		if strings.HasPrefix(name, ".") || name == "Shared" || name == "Public" ||
 			name == "Default" || name == "Default User" || name == "All Users" {
 			continue
 		}
-		dlDir := filepath.Join(usersRoot, name, "Downloads")
-		if _, err := os.Stat(dlDir); err == nil {
-			if err := watcher.Add(dlDir); err != nil {
-				log.Printf("yara watcher: cannot watch %s: %v", dlDir, err)
-			} else {
-				log.Printf("yara watcher: watching %s", dlDir)
+		base := filepath.Join(usersRoot, name)
+
+		var dirs []string
+		if runtime.GOOS == "windows" {
+			dirs = []string{
+				filepath.Join(base, "Downloads"),
+				filepath.Join(base, "Desktop"),
+				// Browser and loader temp paths — the most common off-Downloads
+				// drop zones for phishing payloads and drive-by downloads.
+				filepath.Join(base, `AppData\Local\Temp`),
+				filepath.Join(base, `AppData\Local\Microsoft\Windows\INetCache\IE`),
+			}
+		} else {
+			dirs = []string{
+				filepath.Join(base, "Downloads"),
+				filepath.Join(base, "Desktop"),
+				filepath.Join(base, "Library", "Caches"),
 			}
 		}
+
+		for _, d := range dirs {
+			watchOne(watcher, d)
+		}
+	}
+}
+
+// watchOne adds a single directory to the watcher, logging the outcome.
+func watchOne(watcher *fsnotify.Watcher, dir string) {
+	if _, err := os.Stat(dir); err != nil {
+		return // does not exist — skip silently
+	}
+	if err := watcher.Add(dir); err != nil {
+		log.Printf("yara watcher: cannot watch %s: %v", dir, err)
+	} else {
+		log.Printf("yara watcher: watching %s", dir)
 	}
 }
 
@@ -288,28 +305,25 @@ func handleYaraCheck(ctx context.Context, cfg *Config, filePath string) {
 
 	log.Printf("yara watcher: MATCH in %s: %s", filePath, result)
 
-	// Immediate response — sever network before the file can call home.
-	severNetwork()
-
-	host, _ := os.Hostname()
-	ts := time.Now().UTC().Format(time.RFC3339)
+	// Quarantine the matched file immediately. The network stays up so that
+	// telemetry reaches Guardian without delay — only the specific file is
+	// neutralised, not the endpoint's connectivity.
+	if err := quarantineMatchedFile(filePath); err != nil {
+		log.Printf("yara watcher: quarantine failed for %s: %v", filePath, err)
+	} else {
+		log.Printf("yara watcher: quarantined %s → %s", filePath, quarantineDir())
+	}
 
 	if cfg == nil {
 		return
 	}
-	go func() {
-		body := fmt.Sprintf(
-			`{"trigger":"yara_reflex","host":%q,"ts":%q,"file":%q,"match":%q}`,
-			host, ts, filePath, result,
-		)
-		req, err := http.NewRequest("POST", cfg.endpoint(pathReflex), strings.NewReader(body))
-		if err != nil {
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+cfg.ReflexToken)
-		req.Header.Set("Content-Type", "application/json")
-		(&http.Client{Timeout: 5 * time.Second}).Do(req) //nolint:errcheck
-	}()
+
+	host, _ := os.Hostname()
+	ts := time.Now().UTC().Format(time.RFC3339)
+	postReflexTelemetry(cfg, fmt.Sprintf(
+		`{"trigger":"yara_reflex","host":%q,"ts":%q,"file":%q,"match":%q}`,
+		host, ts, filePath, result,
+	))
 }
 
 // yaraRulesPath returns the path to the YARA rules file (preferring compiled .yarc)

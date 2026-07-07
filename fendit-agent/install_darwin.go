@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -26,8 +27,6 @@ const (
 // act is the response from POST /api/v1/agent/activate — all credentials are
 // already resolved; no network call is made from within install().
 func install(act *ActivateResponse) error {
-	fmt.Println("[*] Fendit onboarding gestart...")
-
 	apiBase := act.APIBase
 	if apiBase == "" {
 		apiBase = defaultAPIBase
@@ -35,15 +34,15 @@ func install(act *ActivateResponse) error {
 
 	// 1. Download Wazuh package.
 	wazuhPkg := "/tmp/fendit_agent.pkg"
-	fmt.Printf("[*] Downloaden Fendit Agent van %s...\n", act.AgentURL)
+	fmt.Printf("[*] Downloading Fendit Agent from %s...\n", act.AgentURL)
 	if err := downloadFile(wazuhPkg, act.AgentURL); err != nil {
 		return fmt.Errorf("download wazuh: %w", err)
 	}
 	defer os.Remove(wazuhPkg)
 
-	// 2. Base install — credentials are never passed as env/CLI args to the
-	//    installer; agent-auth handles secure Wazuh manager registration below.
-	fmt.Println("[*] Starten basisinstallatie...")
+	// 2. Silent PKG install — credentials are never passed as env/CLI args.
+	//    agent-auth handles secure Wazuh manager registration below.
+	fmt.Println("[*] Running silent installer...")
 	if out, err := exec.Command("/usr/sbin/installer", "-pkg", wazuhPkg, "-target", "/").
 		CombinedOutput(); err != nil {
 		return fmt.Errorf("wazuh install: %w\n%s", err, out)
@@ -51,20 +50,20 @@ func install(act *ActivateResponse) error {
 
 	// 2a. Register the agent with the Wazuh manager via agent-auth.
 	if act.WazuhManager != "" {
-		fmt.Printf("[*] Registreren bij Wazuh manager %s (groep: %s)...\n",
+		fmt.Printf("[*] Registering with Wazuh manager %s (group: %s)...\n",
 			act.WazuhManager, act.InstallGroup)
 		authArgs := []string{"-m", act.WazuhManager}
 		if act.InstallGroup != "" {
 			authArgs = append(authArgs, "-G", act.InstallGroup)
 		}
 		if out, err := exec.Command(wazuhAuthBin, authArgs...).CombinedOutput(); err != nil {
-			fmt.Printf("[!] agent-auth mislukt (niet-fataal): %v\n%s\n", err, out)
+			fmt.Printf("[!] agent-auth failed (non-fatal): %v\n%s\n", err, out)
 		} else {
-			fmt.Println("[*] Wazuh agent succesvol geregistreerd.")
+			fmt.Println("[*] Wazuh agent registered.")
 		}
 	}
 
-	// 3. Save encrypted config.
+	// 3. Save encrypted config and lock down the config directory.
 	if err := os.MkdirAll(filepath.Join(fenditDir, "config"), 0700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
@@ -75,16 +74,24 @@ func install(act *ActivateResponse) error {
 	}); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
-	exec.Command("chmod", "750", fenditDir).Run()             //nolint:errcheck
-	exec.Command("chown", "-R", "root:wheel", fenditDir).Run() //nolint:errcheck
+	// Lock fenditDir to root:wheel 750 via native Go calls — no exec.Command("chmod").
+	os.Chmod(fenditDir, 0750)   //nolint:errcheck
+	os.Chown(fenditDir, 0, 0)   //nolint:errcheck (root:wheel — GID 0 on macOS)
 
-	// 5. Honeypot + instant network severance reflex.
-	fmt.Println("[*] Configureren Honeypot & Local Trigger...")
-	if err := setupHoneypot(); err != nil {
-		fmt.Printf("[!] Honeypot setup gefaald (niet-fataal): %v\n", err)
+	// 4. Create honeypot decoy files in the watchable directory.
+	fmt.Println("[*] Setting up honeypot...")
+	if err := createHoneypotDecoys(); err != nil {
+		fmt.Printf("[!] Honeypot decoy creation failed (non-fatal): %v\n", err)
 	}
 
-	// 6. Register the Go binary as the main agent daemon + tray agent.
+	// 5. Install launchd WatchPaths plist as a secondary honeypot trigger.
+	//    The daemon's fsnotify watcher (runHoneypotWatcher) is the primary path;
+	//    this plist re-invokes the binary if the daemon is restarting at trigger time.
+	if err := setupHoneypotPlist(); err != nil {
+		fmt.Printf("[!] Honeypot plist install failed (non-fatal): %v\n", err)
+	}
+
+	// 6. Install the agent LaunchDaemon and tray LaunchAgent.
 	if err := installLaunchDaemons(); err != nil {
 		return fmt.Errorf("install launch daemons: %w", err)
 	}
@@ -92,12 +99,12 @@ func install(act *ActivateResponse) error {
 	// 7. Start Wazuh (telemetry ingest only — no active-response scripts deployed).
 	exec.Command(wazuhControlBin, "start").Run() //nolint:errcheck
 
-	fmt.Println("[SUCCESS] Mac Onboarding afgerond.")
+	fmt.Println("[SUCCESS] macOS installation complete.")
 	openBrowser(portalURL)
 	return nil
 }
 
-// downloadFile streams url to dst path using a long timeout for large packages.
+// downloadFile streams url to dst using a long timeout for large packages.
 func downloadFile(dst, url string) error {
 	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Get(url) //nolint:gosec
@@ -117,18 +124,10 @@ func downloadFile(dst, url string) error {
 	return err
 }
 
-func setupHoneypot() error {
-	honeypotDir := "/Users/Shared/Confidential_Passwords"
-	if err := os.MkdirAll(honeypotDir, 0777); err != nil {
-		return err
-	}
-	os.WriteFile(honeypotDir+"/database_credentials.txt", //nolint:errcheck
-		[]byte("admin_db: supersecret123\n"), 0644)
-	exec.Command("chmod", "-R", "777", honeypotDir).Run() //nolint:errcheck
-
-	// LaunchDaemon watching the honeypot dir.
-	// On trigger launchd calls the Go binary --reflex honeypot, which severs the
-	// network and posts telemetry — no bash script ever touches the token.
+// setupHoneypotPlist installs a launchd WatchPaths daemon that invokes the
+// agent with --reflex honeypot when the decoy directory is touched.
+// This is the backup/secondary trigger; the primary is runHoneypotWatcher.
+func setupHoneypotPlist() error {
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -139,23 +138,23 @@ func setupHoneypot() error {
     <string>honeypot</string>
   </array>
   <key>WatchPaths</key><array>
-    <string>/Users/Shared/Confidential_Passwords</string>
+    <string>%s</string>
   </array>
   <key>RunAtLoad</key><false/>
-</dict></plist>`, agentBin)
+</dict></plist>`, agentBin, honeypotDir)
 
 	plistPath := filepath.Join(launchdDir, "eu.fendit.honeypot.plist")
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return err
 	}
-	exec.Command("launchctl", "load", plistPath).Run() //nolint:errcheck
+	exec.Command("launchctl", "bootstrap", "system", plistPath).Run() //nolint:errcheck
 	return nil
 }
 
-// installLaunchDaemons installs the main agent LaunchDaemon and the tray LaunchAgent.
-// The PKG payload already copied the binary to agentBin before postinstall runs.
+// installLaunchDaemons installs the main agent LaunchDaemon (system, runs as
+// root at boot) and the tray LaunchAgent (user-session, shows menu-bar icon).
 func installLaunchDaemons() error {
-	// Main daemon — runs as root at boot, KeepAlive.
+	// Main daemon — runs as root at boot, KeepAlive restarts it if it exits.
 	agentPlist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -173,9 +172,11 @@ func installLaunchDaemons() error {
 	if err := os.WriteFile(agentPlistPath, []byte(agentPlist), 0644); err != nil {
 		return fmt.Errorf("write agent plist: %w", err)
 	}
-	exec.Command("launchctl", "load", agentPlistPath).Run() //nolint:errcheck
+	// Unload any stale instance (ignore error — may not be loaded).
+	exec.Command("launchctl", "bootout", "system", agentPlistPath).Run() //nolint:errcheck
+	exec.Command("launchctl", "bootstrap", "system", agentPlistPath).Run() //nolint:errcheck
 
-	// Tray agent — runs as the console user, shows menu-bar icon.
+	// Tray agent — runs in the logged-in user's session.
 	os.MkdirAll(launchAgDir, 0755) //nolint:errcheck
 	trayPlist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -193,7 +194,33 @@ func installLaunchDaemons() error {
 	if err := os.WriteFile(trayPlistPath, []byte(trayPlist), 0644); err != nil {
 		return fmt.Errorf("write tray plist: %w", err)
 	}
-	exec.Command("launchctl", "load", trayPlistPath).Run() //nolint:errcheck
+
+	// Bootstrap the tray agent in the current console user's session.
+	consoleUser := consoleUsername()
+	if consoleUser != "" && consoleUser != "root" {
+		uid := consoleUID(consoleUser)
+		if uid != "" {
+			exec.Command("launchctl", "bootstrap", "user/"+uid, trayPlistPath).Run() //nolint:errcheck
+		}
+	}
 
 	return nil
+}
+
+// consoleUsername returns the username of the currently logged-in console user.
+func consoleUsername() string {
+	out, err := exec.Command("stat", "-f", "%Su", "/dev/console").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// consoleUID returns the numeric UID string for a given username.
+func consoleUID(username string) string {
+	out, err := exec.Command("id", "-u", username).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

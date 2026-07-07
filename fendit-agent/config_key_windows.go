@@ -5,32 +5,27 @@ package main
 import (
 	"crypto/sha256"
 	"os"
-	"os/exec"
-	"strings"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 // machineKey derives a 32-byte AES key from the Windows MachineGuid registry value.
-// Falls back to hostname if the registry query fails.
+// Uses the native registry API — no reg.exe child process is spawned.
+// Falls back to hostname if the registry read fails.
 func machineKey() []byte {
-	out, err := exec.Command(
-		"reg", "query",
-		`HKLM\SOFTWARE\Microsoft\Cryptography`,
-		"/v", "MachineGuid",
-	).Output()
+	k, err := registry.OpenKey(
+		registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Cryptography`,
+		registry.QUERY_VALUE|registry.WOW64_64KEY,
+	)
 	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.Contains(line, "MachineGuid") {
-				fields := strings.Fields(line)
-				if len(fields) >= 3 {
-					guid := strings.TrimSpace(fields[len(fields)-1])
-					if guid != "" {
-						h := sha256.Sum256([]byte("fendit:" + guid))
-						return h[:]
-					}
-				}
-			}
+		defer k.Close()
+		if guid, _, err := k.GetStringValue("MachineGuid"); err == nil && guid != "" {
+			h := sha256.Sum256([]byte("fendit:" + guid))
+			return h[:]
 		}
 	}
+
 	hostname, _ := os.Hostname()
 	h := sha256.Sum256([]byte("fendit:fallback:" + hostname))
 	return h[:]

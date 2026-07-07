@@ -1,30 +1,26 @@
 #!/bin/bash
+# postinstall — runs as root after fendit_base.pkg installs FenditInstaller.app.
+# Opens the Fendit installer in the console user's graphical session so the
+# activation UI appears without requiring a separate manual launch.
 
-# Veiligheidshalve stoppen bij fouten
 set -e
 
-PLIST_PATH="/Library/LaunchDaemons/eu.fendit.agent.plist"
-BINARY_PATH="/usr/local/bin/fendit-agent"
+APP_PATH="/Applications/FenditInstaller.app"
 
-echo "Fendit Post-Install: Rechten rechttrekken..."
+# Determine the console user (the person who initiated the pkg install).
+CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || true)
 
-# 1. Zorg dat de binary executable is
-if [ -f "$BINARY_PATH" ]; then
-    chmod +x "$BINARY_PATH"
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+  CONSOLE_UID=$(id -u "$CONSOLE_USER" 2>/dev/null || true)
+  if [ -n "$CONSOLE_UID" ]; then
+    # Launch the app in the user's own graphical session so the Wails window
+    # renders correctly. The app's startup() will request elevation via osascript.
+    launchctl asuser "$CONSOLE_UID" open -a "$APP_PATH"
+    exit 0
+  fi
 fi
 
-# 2. Fix de rechten van de plist (macOS Launchd eist root:wheel en 644)
-if [ -f "$PLIST_PATH" ]; then
-    chown root:wheel "$PLIST_PATH"
-    chmod 644 "$PLIST_PATH"
+# Fallback: direct open (works when postinstall runs with an active display).
+open -a "$APP_PATH" 2>/dev/null || true
 
-    echo "Fendit Post-Install: LaunchDaemon registreren en starten..."
-
-    # 3. Laad en start de service direct zonder herstart (moderne launchctl bootstrap)
-    # We gebruiken || true zodat het script niet crasht als de service al geladen was
-    launchctl bootstrap system "$PLIST_PATH" 2>/dev/null || true
-    launchctl kickstart -k system/eu.fendit.agent 2>/dev/null || true
-fi
-
-echo "Fendit Post-Install: Succesvol afgerond!"
 exit 0

@@ -26,11 +26,13 @@ func main() {
 
 	wails.Run(&options.App{ //nolint:errcheck
 		Title:            "Fendit Security",
-		Width:            480,
-		Height:           560,
+		Width:            450,
+		Height:           600,
 		DisableResize:    true,
 		Frameless:        true,
 		BackgroundColour: &options.RGBA{R: 15, G: 15, B: 24, A: 255},
+		CSSDragProperty:  "--wails-draggable",
+		CSSDragValue:     "drag",
 		AssetServer: &assetserver.Options{
 			Assets: sub,
 		},

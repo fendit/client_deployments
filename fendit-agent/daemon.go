@@ -46,6 +46,18 @@ func startDaemon() {
 		runHealthPinger(ctx, cfg)
 	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runHoneypotWatcher(ctx, cfg)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runPendingFlusher(ctx, cfg)
+	}()
+
 	log.Printf("daemon: started (org=%s api=%s)", cfg.OrgName, cfg.APIBase)
 	wg.Wait()
 	log.Println("daemon: all goroutines stopped — clean shutdown complete")

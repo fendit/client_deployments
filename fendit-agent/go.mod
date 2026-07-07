@@ -1,11 +1,14 @@
 module fendit-agent
 
-go 1.23
+go 1.25.0
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1
+	github.com/gen2brain/dlgs v0.0.0-20220603100644-40c77870fa8d
 	github.com/getlantern/systray v1.2.2
+	github.com/hectane/go-acl v1.0.0
 	github.com/kardianos/service v1.2.2
+	golang.org/x/sys v0.46.0
 )
 
 require (
@@ -16,6 +19,6 @@ require (
 	github.com/getlantern/hidden v0.0.0-20190325191715-f02dbb02be55 // indirect
 	github.com/getlantern/ops v0.0.0-20190325191751-d70cb0d6f85f // indirect
 	github.com/go-stack/stack v1.8.0 // indirect
+	github.com/gopherjs/gopherjs v1.21.0 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
-	golang.org/x/sys v0.21.0 // indirect
 )

@@ -4,9 +4,9 @@
   "outputfilename": "fendit-installer",
   "frontend": {
     "dir": "frontend",
-    "install": "",
-    "build": "",
-    "dev": "",
+    "install": "npm install",
+    "build": "npm run build",
+    "dev": "npm run dev",
     "devUrl": "http://localhost:3000"
   },
   "author": {

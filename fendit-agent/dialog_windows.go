@@ -5,10 +5,10 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"strings"
 	"syscall"
 	"unsafe"
+
+	"github.com/gen2brain/dlgs"
 )
 
 var (
@@ -17,6 +17,7 @@ var (
 )
 
 // fatalDialog shows a native Windows MessageBox error dialog.
+// Direct syscall to MessageBoxW — no child process.
 func fatalDialog(title, msg string) {
 	fmt.Fprintf(os.Stderr, "%s: %s\n", title, msg)
 	t, _ := syscall.UTF16PtrFromString(title)
@@ -29,22 +30,14 @@ func fatalDialog(title, msg string) {
 	)
 }
 
-// inputDialog shows a Windows input prompt via PowerShell's VisualBasic InputBox
-// and returns the trimmed text the user entered. Returns "" if the user cancels.
+// inputDialog shows a native Windows input dialog and returns the text the user
+// entered. Returns "" if the user clicks Cancel or the dialog fails.
+// Uses dlgs.Entry which calls CreateDialogParamW/DialogBoxParamW via Win32 API —
+// no powershell.exe child process is spawned.
 func inputDialog(title, prompt string) string {
-	safe := func(s string) string {
-		return strings.ReplaceAll(s, "'", "`'")
-	}
-	script := fmt.Sprintf(
-		"[Reflection.Assembly]::LoadWithPartialName('Microsoft.VisualBasic') | Out-Null;"+
-			" [Microsoft.VisualBasic.Interaction]::InputBox('%s','%s','')",
-		safe(prompt), safe(title),
-	)
-	out, err := exec.Command(
-		"powershell", "-NonInteractive", "-Command", script,
-	).Output()
-	if err != nil {
+	text, ok, err := dlgs.Entry(title, prompt, "")
+	if err != nil || !ok {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return text
 }

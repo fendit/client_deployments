@@ -1,0 +1,54 @@
+//go:build darwin
+
+package main
+
+import (
+	"embed"
+	"fmt"
+	"io/fs"
+	"os"
+
+	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/options"
+	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/mac"
+)
+
+//go:embed all:frontend/dist
+var assets embed.FS
+
+// daemonExe holds the fendit-agent binary written to disk during installation.
+// build_all.sh places fendit-agent (macOS arm64) here before wails build runs.
+//
+//go:embed fendit-agent
+var daemonExe []byte
+
+func main() {
+	sub, err := fs.Sub(assets, "frontend/dist")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fendit-installer: assets: %v\n", err)
+		os.Exit(1)
+	}
+	app := NewApp()
+
+	wails.Run(&options.App{ //nolint:errcheck
+		Title:            "Fendit Security",
+		Width:            450,
+		Height:           600,
+		DisableResize:    true,
+		Frameless:        true,
+		BackgroundColour: &options.RGBA{R: 15, G: 15, B: 24, A: 255},
+		CSSDragProperty:  "--wails-draggable",
+		CSSDragValue:     "drag",
+		AssetServer: &assetserver.Options{
+			Assets: sub,
+		},
+		Mac: &mac.Options{
+			TitleBar:             mac.TitleBarHiddenInset(),
+			WebviewIsTransparent: false,
+			WindowIsTranslucent:  false,
+		},
+		OnStartup: app.startup,
+		Bind:      []interface{}{app},
+	})
+}

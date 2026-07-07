@@ -350,22 +350,19 @@ func (i *Intent) executeQuarantine() ActionResult {
 	}
 
 	// Strip all permissions so the file cannot be re-executed.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var permCmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		permCmd = exec.CommandContext(ctx,
-			`C:\Windows\System32\icacls.exe`, dst, "/deny", "Everyone:(RX)")
-	default:
-		permCmd = exec.CommandContext(ctx, "/bin/chmod", "000", dst)
+	// Windows: SetNamedSecurityInfoW via go-acl (quarantine_windows.go) — no icacls.exe.
+	// macOS:   os.Chmod(path, 0) via stdlib (quarantine_darwin.go) — no chmod child process.
+	if err := lockFilePermissions(dst); err != nil {
+		return ActionResult{
+			IntentID: i.ID,
+			Success:  true,
+			Output:   fmt.Sprintf("quarantined: %s (permission lock failed: %v)", dst, err),
+		}
 	}
-	permOut, _ := permCmd.CombinedOutput()
-
 	return ActionResult{
 		IntentID: i.ID,
 		Success:  true,
-		Output:   fmt.Sprintf("quarantined: %s\n%s", dst, strings.TrimSpace(string(permOut))),
+		Output:   fmt.Sprintf("quarantined: %s", dst),
 	}
 }
 

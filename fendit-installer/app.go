@@ -18,10 +18,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
-	"golang.org/x/sys/windows"
 )
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ type ActivateResponse struct {
 }
 
 func NewApp() *App {
-	os.MkdirAll(fenditDir, 0700)
+	os.MkdirAll(fenditDir, 0700) //nolint:errcheck
 	f, err := os.OpenFile(installLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err == nil {
 		log = slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -78,11 +78,14 @@ func NewApp() *App {
 	return &App{}
 }
 
+// startup is called by Wails immediately after the window is created.
+// If the process is not elevated we re-launch with UAC and exit; otherwise
+// the installer continues normally.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	if !isAdmin() {
-		log.Warn("not administrator — requesting elevation")
-		relaunchAsAdmin()
+		log.Warn("not administrator — requesting elevation via ShellExecuteW runas")
+		relaunchAsAdmin() // elevation_windows.go — no powershell.exe spawned
 	}
 }
 
@@ -91,7 +94,8 @@ func (a *App) emit(msg string) {
 	runtime.EventsEmit(a.ctx, "phase", msg)
 }
 
-// Activate is the single entry point called from the frontend.
+// ── Activate — single entry point called from the frontend ───────────────────
+
 func (a *App) Activate(code string) ActivationResult {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if len(code) != 6 {
@@ -120,15 +124,15 @@ func (a *App) Activate(code string) ActivationResult {
 	}
 	defer os.Remove(msiPath)
 
-	// ── Phase 3: Remove stale Wazuh (prevents 1603) ───────────────────────────
-	if isWazuhInstalled() {
+	// ── Phase 3: Remove stale Wazuh install (prevents msiexec error 1603) ────
+	if isWazuhInstalled() { // wazuh_windows.go — registry-based detection
 		a.emit("Removing previous installation...")
-		if err := uninstallWazuh(); err != nil {
+		if err := uninstallWazuh(); err != nil { // wazuh_windows.go — no WMI/PS1
 			log.Warn("prior Wazuh uninstall failed (continuing)", "err", err)
 		}
 	}
 
-	// ── Phase 4: Install Wazuh MSI ────────────────────────────────────────────
+	// ── Phase 4: Silent MSI install ───────────────────────────────────────────
 	a.emit("Installing security agent...")
 	if err := a.installMSI(msiPath); err != nil {
 		log.Error("MSI install failed", "err", err)
@@ -160,10 +164,13 @@ func (a *App) Activate(code string) ActivationResult {
 		log.Warn("daemon deploy failed (non-fatal)", "err", err)
 	}
 
-	// ── Phase 7: Confirm success to backend ──────────────────────────────────
+	// ── Phase 7: Confirm success to backend + start Wazuh ────────────────────
 	a.emit("Activating protection...")
 	a.confirm(act)
-	exec.Command("sc.exe", "start", "Wazuh").Run() //nolint:errcheck
+
+	startWazuh := exec.Command("sc.exe", "start", "Wazuh")
+	startWazuh.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	startWazuh.Run() //nolint:errcheck
 
 	log.Info("installation complete")
 	return ActivationResult{Success: true}
@@ -242,14 +249,17 @@ func (a *App) downloadMSI(dst, url string) error {
 	return err
 }
 
+// installMSI runs a fully silent msiexec install. HideWindow: true prevents any
+// CMD or progress window from flashing — a common EDR behavioural trigger.
 func (a *App) installMSI(msiPath string) error {
 	cmd := exec.Command(
 		"msiexec.exe",
 		"/i", msiPath,
-		"/qn",          // silent
+		"/qn",
 		"/norestart",
-		"/L*V", msiLog, // verbose log — critical for debugging 1603
+		"/L*V", msiLog,
 	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	exitCode := -1
 	if cmd.ProcessState != nil {
@@ -262,12 +272,16 @@ func (a *App) installMSI(msiPath string) error {
 	return nil
 }
 
+// registerWazuhAgent calls agent-auth.exe to enroll the endpoint with the Wazuh
+// manager. HideWindow: true prevents a console window from appearing.
 func (a *App) registerWazuhAgent(act *ActivateResponse) {
 	args := []string{"-m", act.WazuhManager}
 	if act.InstallGroup != "" {
 		args = append(args, "-G", act.InstallGroup)
 	}
-	out, err := exec.Command(wazuhAuthBin, args...).CombinedOutput()
+	cmd := exec.Command(wazuhAuthBin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Warn("agent-auth failed (non-fatal)", "err", err, "output", string(out))
 	} else {
@@ -275,28 +289,47 @@ func (a *App) registerWazuhAgent(act *ActivateResponse) {
 	}
 }
 
+// deployDaemon writes the embedded agent binary, registers it as a Windows
+// service via the SCM API, and adds it to the current user's Run key — all
+// without spawning powershell.exe, cmd.exe, or any shell script.
 func (a *App) deployDaemon() error {
 	dest := agentBinDst
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		return err
+		return fmt.Errorf("create agent dir: %w", err)
 	}
 	if err := os.WriteFile(dest, daemonExe, 0755); err != nil {
-		return fmt.Errorf("write daemon: %w", err)
+		return fmt.Errorf("write agent binary: %w", err)
 	}
-	// Register and start the daemon as a Windows service.
-	exec.Command(dest, "--service", "install").Run() //nolint:errcheck
-	exec.Command(dest, "--service", "start").Run()   //nolint:errcheck
 
-	// Tray: add to current-user Run key so it launches at login.
-	regScript := fmt.Sprintf(
-		`Set-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' `+
-			`-Name 'FenditTray' -Value '"%s" --tray'`, dest)
-	exec.Command("powershell", "-NonInteractive", "-Command", regScript).Run() //nolint:errcheck
+	// Register as a Windows service via the SCM API (registry_windows.go).
+	// Non-fatal: a reboot will complete service registration on most failure modes.
+	if err := installWindowsService(dest); err != nil {
+		log.Warn("service registration failed (non-fatal)", "err", err)
+	}
+
+	// Register the fendit:// protocol handler (registry_windows.go).
+	if err := registerProtocolHandler(dest); err != nil {
+		log.Warn("protocol handler registration failed (non-fatal)", "err", err)
+	}
+
+	// Add FenditTray to the current user's Run key (registry_windows.go).
+	if err := setRunKey(dest); err != nil {
+		log.Warn("Run key registration failed (non-fatal)", "err", err)
+	}
+
+	// Launch the tray for the current interactive session immediately.
+	// HideWindow is intentionally false — the tray icon is expected to appear.
+	tray := exec.Command(dest, "--tray")
+	tray.SysProcAttr = &syscall.SysProcAttr{HideWindow: false}
+	tray.Start() //nolint:errcheck
+
 	return nil
 }
 
-// ── Config persistence (AES-256-GCM, machine-key derived) ────────────────────
+// ── Config persistence ────────────────────────────────────────────────────────
 
+// saveConfig persists the agent token (AES-256-GCM encrypted with the
+// machine-derived key), API base URL, and organization name to disk.
 func saveConfig(token, apiBase, orgName string) error {
 	if err := os.MkdirAll(fenditConfig, 0700); err != nil {
 		return err
@@ -325,7 +358,7 @@ func saveConfig(token, apiBase, orgName string) error {
 }
 
 func encryptToken(plaintext string) (string, error) {
-	key := machineKey()
+	key := machineKey() // config_key_windows.go
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -341,59 +374,3 @@ func encryptToken(plaintext string) (string, error) {
 	ct := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
 	return base64.StdEncoding.EncodeToString(ct), nil
 }
-
-// ── Wazuh detection / removal ─────────────────────────────────────────────────
-
-func isWazuhInstalled() bool {
-	_, err := os.Stat(`C:\Program Files (x86)\ossec-agent`)
-	return err == nil
-}
-
-func uninstallWazuh() error {
-	exec.Command("sc.exe", "stop", "Wazuh").Run() //nolint:errcheck
-	time.Sleep(2 * time.Second)
-	// Uninstall via WMI — handles any Wazuh version without needing the GUID.
-	cmd := exec.Command("powershell", "-NonInteractive", "-Command",
-		`Get-WmiObject Win32_Product | Where-Object {$_.Name -like "*Wazuh*"} | `+
-			`ForEach-Object { $_.Uninstall() }`)
-	return cmd.Run()
-}
-
-// ── Windows elevation ─────────────────────────────────────────────────────────
-
-func isAdmin() bool {
-	var sid *windows.SID
-	if err := windows.AllocateAndInitializeSid(
-		&windows.SECURITY_NT_AUTHORITY, 2,
-		windows.SECURITY_BUILTIN_DOMAIN_RID,
-		windows.DOMAIN_ALIAS_RID_ADMINS,
-		0, 0, 0, 0, 0, 0, &sid,
-	); err != nil {
-		return false
-	}
-	defer windows.FreeSid(sid)
-	t, err := windows.OpenCurrentProcessToken()
-	if err != nil {
-		return false
-	}
-	defer t.Close()
-	ok, err := t.IsMember(sid)
-	return err == nil && ok
-}
-
-// relaunchAsAdmin re-launches the current binary with UAC elevation, then exits.
-func relaunchAsAdmin() {
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	// PowerShell Start-Process with -Verb RunAs triggers the UAC prompt.
-	cmd := exec.Command("powershell", "-NonInteractive", "-Command",
-		fmt.Sprintf(`Start-Process -FilePath '%s' -Verb RunAs`, exe))
-	if cmd.Start() == nil {
-		os.Exit(0)
-	}
-}
-
-// machineKey is implemented in config_key_windows.go (same as fendit-agent).
-// Copy that file into this package at build time.
