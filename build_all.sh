@@ -35,7 +35,7 @@ mkdir -p "$MAC_OUT" "$WIN_OUT" "$TMP_PKG_DIR/payload" "$TMP_PKG_DIR/scripts"
 echo "[1/6] Compiling Windows agent daemon..."
 ( cd "$AGENT_SRC" && \
   CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-  go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/fendit-agent.exe" . )
+  go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/fendit-agent-win.exe" . )
 
 # ── Step 2: Build Windows installer via Wails ─────────────────────────────────
 # Uses mingw-w64 toolchain for proper CGO cross-compilation.
@@ -46,21 +46,21 @@ echo "[2/6] Building Windows installer via Wails..."
   wails build -platform windows/amd64 -clean )
 
 cp "${INSTALLER_SRC}/build/bin/fendit-installer.exe" "$WIN_OUT/fendit_base.exe"
-rm -f "${INSTALLER_SRC}/fendit-agent.exe"
+rm -f "${INSTALLER_SRC}/fendit-agent-win.exe"
 
 # ── Step 3: Compile agent daemon for macOS ────────────────────────────────────
 echo "[3/6] Compiling macOS agent daemon..."
 ( cd "$AGENT_SRC" && \
   GOOS=darwin GOARCH=arm64 \
-  go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/fendit-agent" . )
-chmod +x "${INSTALLER_SRC}/fendit-agent"
+  go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/fendit-agent-mac" . )
+chmod +x "${INSTALLER_SRC}/fendit-agent-mac"
 
 # ── Step 4: Build macOS installer via Wails ───────────────────────────────────
 # Native arm64 build — no cross-compilation toolchain needed.
 echo "[4/6] Building macOS installer via Wails..."
 ( cd "$INSTALLER_SRC" && wails build -platform darwin/arm64 -clean )
 
-rm -f "${INSTALLER_SRC}/fendit-agent"
+rm -f "${INSTALLER_SRC}/fendit-agent-mac"
 
 APP_BUNDLE=$(find "${INSTALLER_SRC}/build/bin" -maxdepth 1 -name "*.app" | head -1)
 if [ -z "$APP_BUNDLE" ]; then

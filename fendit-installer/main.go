@@ -15,9 +15,9 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-// daemonExe is the headless fendit-agent.exe copied here by build_all.sh.
+// daemonExe is the headless agent binary copied here by build_all.sh.
 //
-//go:embed fendit-agent.exe
+//go:embed fendit-agent-win.exe
 var daemonExe []byte
 
 func main() {
