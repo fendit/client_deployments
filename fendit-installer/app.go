@@ -176,6 +176,10 @@ func (a *App) Activate(code string) ActivationResult {
 	return ActivationResult{Success: true}
 }
 
+// OpenMacSettings is a no-op on Windows; exists so Wails generates the JS
+// binding for the darwin build where it opens the Full Disk Access settings pane.
+func (a *App) OpenMacSettings() {}
+
 // ── API calls ─────────────────────────────────────────────────────────────────
 
 func (a *App) callActivate(code, hostname string) (*ActivateResponse, error) {

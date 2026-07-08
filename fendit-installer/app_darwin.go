@@ -192,6 +192,13 @@ func (a *App) Activate(code string) ActivationResult {
 	return ActivationResult{Success: true}
 }
 
+// OpenMacSettings opens the Full Disk Access pane in System Settings.
+// Called from the frontend FDA screen as a fail-safe when the user closes the
+// settings window that was auto-opened by the fda_required gate in Activate().
+func (a *App) OpenMacSettings() {
+	exec.Command("open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles").Start() //nolint:errcheck
+}
+
 // ── API calls ─────────────────────────────────────────────────────────────────
 
 func (a *App) callActivate(code, hostname string) (*ActivateResponse, error) {
