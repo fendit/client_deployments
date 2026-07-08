@@ -1,16 +1,12 @@
 package main
 
 import (
-	_ "embed"
 	"log"
 	"os/exec"
 	"runtime"
 
 	"github.com/getlantern/systray"
 )
-
-//go:embed icon.ico
-var fenditIcon []byte
 
 const portalURL = "https://portal.fendit.eu"
 
@@ -19,7 +15,7 @@ func runTray() {
 }
 
 func onReady() {
-	systray.SetIcon(fenditIcon)
+	setTrayIcon() // implemented per platform in tray_darwin.go / tray_windows.go
 	systray.SetTitle("Fendit")
 	systray.SetTooltip("Fendit Security Agent — Protected")
 

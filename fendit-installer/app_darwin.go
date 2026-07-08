@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -96,10 +97,28 @@ func (a *App) emit(msg string) {
 
 // ── Activate — single entry point called from the frontend ───────────────────
 
+// hasFDA probes the TCC database, which is readable only when Full Disk Access
+// has been granted. Even root cannot open this file without FDA.
+func hasFDA() bool {
+	f, err := os.Open("/Library/Application Support/com.apple.TCC/TCC.db")
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
+}
+
 func (a *App) Activate(code string) ActivationResult {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if len(code) != 6 {
 		return ActivationResult{Error: "Code must be exactly 6 characters."}
+	}
+
+	// Full Disk Access is required for the agent to monitor protected paths.
+	// Open the exact settings pane and let the frontend show the guidance screen.
+	if !hasFDA() {
+		exec.Command("open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles").Start() //nolint:errcheck
+		return ActivationResult{Error: "fda_required"}
 	}
 
 	hostname, _ := os.Hostname()
@@ -177,7 +196,7 @@ func (a *App) Activate(code string) ActivationResult {
 
 func (a *App) callActivate(code, hostname string) (*ActivateResponse, error) {
 	body, _ := json.Marshal(map[string]string{
-		"code": code, "hostname": hostname, "os": "darwin", "arch": "arm64",
+		"code": code, "hostname": hostname, "os": "darwin", "arch": goruntime.GOARCH,
 	})
 	resp, err := apiClient.Post(defaultAPIBase+pathActivate, "application/json", bytes.NewReader(body))
 	if err != nil {

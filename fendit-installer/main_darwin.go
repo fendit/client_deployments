@@ -18,9 +18,9 @@ import (
 var assets embed.FS
 
 // daemonExe holds the fendit-agent binary written to disk during installation.
-// build_all.sh places fendit-agent-mac (macOS arm64) here before wails build runs.
+// build_all.sh places fendit-agent-mac (macOS arm64) in embedded/ before wails build runs.
 //
-//go:embed fendit-agent-mac
+//go:embed embedded/fendit-agent-mac
 var daemonExe []byte
 
 func main() {

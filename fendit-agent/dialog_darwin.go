@@ -27,7 +27,7 @@ func inputDialog(title, prompt string) string {
 		return strings.ReplaceAll(s, `"`, `'`)
 	}
 	script := fmt.Sprintf(
-		`set r to display dialog "%s" default answer "" buttons {"Annuleren","OK"} `+
+		`set r to display dialog "%s" default answer "" buttons {"Cancel","OK"} `+
 			`default button "OK" with title "%s"`+"\n"+
 			`return text returned of r`,
 		safe(prompt), safe(title),

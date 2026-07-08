@@ -9,7 +9,7 @@ interface ActivationResult {
   error?: string
 }
 
-type Phase = 'input' | 'installing' | 'success' | 'error'
+type Phase = 'input' | 'installing' | 'success' | 'error' | 'fda'
 
 export default function App() {
   const [digits, setDigits] = useState<string[]>(Array(6).fill(''))
@@ -58,6 +58,8 @@ export default function App() {
     if (result.success) {
       setPhase('success')
       setTimeout(() => Quit(), 3000)
+    } else if (result.error === 'fda_required') {
+      setPhase('fda')
     } else {
       setErrorMsg(result.error ?? 'Installation failed. Please try again.')
       setPhase('error')
@@ -91,12 +93,21 @@ export default function App() {
         <div className={`w-[72px] h-[72px] rounded-2xl flex items-center justify-center transition-colors duration-700 ${
           phase === 'success'
             ? 'bg-emerald-500/15 ring-1 ring-emerald-500/30'
+            : phase === 'fda'
+            ? 'bg-amber-500/15 ring-1 ring-amber-500/30'
             : 'bg-blue-600/15 ring-1 ring-blue-600/30'
         }`}>
           {phase === 'success' ? (
             <svg className="w-9 h-9 text-emerald-400" viewBox="0 0 24 24" fill="none"
               stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
               <polyline points="20 6 9 17 4 12" />
+            </svg>
+          ) : phase === 'fda' ? (
+            <svg className="w-9 h-9 text-amber-400" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              <line x1="12" y1="10" x2="12" y2="14" strokeWidth={2.5} strokeLinecap="round" />
+              <circle cx="12" cy="17" r="0.5" fill="currentColor" strokeWidth={2} />
             </svg>
           ) : phase === 'installing' ? (
             <div className="w-7 h-7 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
@@ -111,13 +122,19 @@ export default function App() {
         {/* Heading + subtitle */}
         <div className="text-center -mt-2">
           <h1 className="text-[17px] font-semibold tracking-tight">
-            {phase === 'success' ? 'Device Protected' : 'Activate Fendit Security'}
+            {phase === 'success'
+              ? 'Device Protected'
+              : phase === 'fda'
+              ? 'Action Required: Apple Security'
+              : 'Activate Fendit Security'}
           </h1>
           <p className="text-sm text-white/40 mt-1.5 leading-snug">
             {phase === 'input' || phase === 'error'
               ? 'Enter the 6-digit code from your organization admin.'
               : phase === 'success'
               ? 'Closing in a moment...'
+              : phase === 'fda'
+              ? 'A system window has opened — follow the steps below.'
               : phaseMsg}
           </p>
         </div>
@@ -174,6 +191,39 @@ export default function App() {
         {/* ── State: installing ─────────────────────────────────────────── */}
         {phase === 'installing' && (
           <p className="text-[13px] text-white/35 animate-pulse -mt-2">{phaseMsg}</p>
+        )}
+
+        {/* ── State: fda — guide the user through the macOS privacy prompt ── */}
+        {phase === 'fda' && (
+          <div className="flex flex-col items-center gap-5 w-full -mt-2">
+            <ol className="text-[12.5px] text-white/50 leading-relaxed space-y-2 self-start w-full">
+              <li className="flex gap-2.5">
+                <span className="text-amber-400 font-semibold shrink-0">1.</span>
+                <span>
+                  In the window that opened, find{' '}
+                  <span className="text-white/80 font-medium">Fendit Security</span> in the list.
+                </span>
+              </li>
+              <li className="flex gap-2.5">
+                <span className="text-amber-400 font-semibold shrink-0">2.</span>
+                <span>
+                  Toggle it{' '}
+                  <span className="text-emerald-400 font-semibold">ON</span>
+                  {' '}and enter your Mac password if prompted.
+                </span>
+              </li>
+              <li className="flex gap-2.5">
+                <span className="text-amber-400 font-semibold shrink-0">3.</span>
+                <span>Click the button below to continue.</span>
+              </li>
+            </ol>
+            <button
+              onClick={handleActivate}
+              className="w-full py-3 rounded-lg text-[14px] font-medium bg-amber-500 hover:bg-amber-400 active:scale-[0.985] cursor-pointer transition-all duration-150 text-black"
+            >
+              Check Again / Continue
+            </button>
+          </div>
         )}
 
         {/* ── State: success — no extra content, icon + heading say it all ── */}
