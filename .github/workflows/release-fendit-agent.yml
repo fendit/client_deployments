@@ -32,6 +32,9 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.9.2
 
+      - name: Install mingw-w64 (Windows cross-compile toolchain)
+        run: brew install mingw-w64
+
       - name: Build all targets
         env:
           VERSION: ${{ github.ref_name }}

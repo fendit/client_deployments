@@ -5,7 +5,7 @@
 #   release/windows/fendit_base.exe  — Wails GUI installer (Windows amd64)
 #   release/osx/fendit_base.pkg      — Wails GUI installer (macOS arm64, pkg-wrapped)
 #
-# Prerequisites on the build host: go, wails, node, npm, pkgbuild
+# Prerequisites: go, wails, node, npm, pkgbuild, mingw-w64
 
 set -euo pipefail
 
@@ -20,9 +20,9 @@ VERSION="${VERSION:-1.0.0}"
 echo "Fendit Build Pipeline — v${VERSION}"
 
 # ── Sanity checks ─────────────────────────────────────────────────────────────
-for cmd in go wails node npm pkgbuild; do
+for cmd in go wails node npm pkgbuild x86_64-w64-mingw32-gcc; do
   if ! command -v "$cmd" &>/dev/null; then
-    echo "ERROR: '$cmd' not found in PATH — install it before running this script."
+    echo "ERROR: '$cmd' not found. Install missing tools before running this script."
     exit 1
   fi
 done
@@ -31,23 +31,21 @@ done
 rm -rf "$OUT_DIR" "$TMP_PKG_DIR"
 mkdir -p "$MAC_OUT" "$WIN_OUT" "$TMP_PKG_DIR/payload" "$TMP_PKG_DIR/scripts"
 
-# ── Step 1: Cross-compile agent daemon for Windows (CGO_ENABLED=0) ────────────
+# ── Step 1: Cross-compile agent daemon for Windows ────────────────────────────
 echo "[1/6] Compiling Windows agent daemon..."
 ( cd "$AGENT_SRC" && \
   CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
   go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/fendit-agent.exe" . )
 
-# ── Step 2: Build Windows installer ──────────────────────────────────────────
-# The React frontend must exist before go build so //go:embed can pick it up.
-echo "[2/6] Building React frontend..."
-( cd "${INSTALLER_SRC}/frontend" && npm ci && npm run build )
-
-echo "[2/6] Cross-compiling Windows installer (fendit_base.exe)..."
+# ── Step 2: Build Windows installer via Wails ─────────────────────────────────
+# Uses mingw-w64 toolchain for proper CGO cross-compilation.
+# wails build handles npm install + build, icon embedding, and bundling.
+echo "[2/6] Building Windows installer via Wails..."
 ( cd "$INSTALLER_SRC" && \
-  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-  go build -ldflags "-s -w -H=windowsgui" \
-    -o "../$WIN_OUT/fendit_base.exe" . )
+  CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 \
+  wails build -platform windows/amd64 -clean )
 
+cp "${INSTALLER_SRC}/build/bin/fendit-installer.exe" "$WIN_OUT/fendit_base.exe"
 rm -f "${INSTALLER_SRC}/fendit-agent.exe"
 
 # ── Step 3: Compile agent daemon for macOS ────────────────────────────────────
@@ -58,8 +56,7 @@ echo "[3/6] Compiling macOS agent daemon..."
 chmod +x "${INSTALLER_SRC}/fendit-agent"
 
 # ── Step 4: Build macOS installer via Wails ───────────────────────────────────
-# wails build produces a proper .app bundle with Info.plist, icon, and the
-# embedded fendit-agent binary (via //go:embed in main_darwin.go).
+# Native arm64 build — no cross-compilation toolchain needed.
 echo "[4/6] Building macOS installer via Wails..."
 ( cd "$INSTALLER_SRC" && wails build -platform darwin/arm64 -clean )
 
@@ -72,7 +69,7 @@ if [ -z "$APP_BUNDLE" ]; then
 fi
 echo "  Found: $APP_BUNDLE"
 
-# ── Step 5: Package .app into a distributable .pkg ────────────────────────────
+# ── Step 5: Package macOS .app into a distributable .pkg ─────────────────────
 echo "[5/6] Packaging macOS .pkg..."
 cp -r "$APP_BUNDLE" "$TMP_PKG_DIR/payload/"
 cp pkg_scripts/postinstall "$TMP_PKG_DIR/scripts/postinstall"
