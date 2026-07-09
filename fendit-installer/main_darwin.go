@@ -24,6 +24,18 @@ var assets embed.FS
 var daemonExe []byte
 
 func main() {
+	// Panic handler must be the first defer so it wraps everything that follows,
+	// including wails.Run(). It fires a last-gasp telemetry POST before os.Exit.
+	defer handleInstallerPanic()
+
+	// Same rule as Windows: check elevation before wails.Run() so that if
+	// os.Exit is needed, the WebKit/WebView2 host window has not yet been
+	// created and there is no cleanup race.
+	if !isAdmin() {
+		relaunchAsAdmin()
+		return // unreachable on success — relaunchAsAdmin calls os.Exit(0)
+	}
+
 	sub, err := fs.Sub(assets, "frontend/dist")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fendit-installer: assets: %v\n", err)

@@ -21,6 +21,19 @@ var assets embed.FS
 var daemonExe []byte
 
 func main() {
+	// Panic handler must be the first defer so it wraps everything that follows,
+	// including wails.Run(). It fires a last-gasp telemetry POST before os.Exit.
+	defer handleInstallerPanic()
+
+	// Elevation MUST be checked before wails.Run(). If os.Exit is called after
+	// WebView2 has started, Chrome_WidgetWin_0 remains registered while its
+	// HWND still exists; UnregisterClass in the WebView2 DLL teardown then
+	// fails with ERROR_CLASS_HAS_WINDOWS (Win32 error 1412).
+	if !isAdmin() {
+		relaunchAsAdmin()
+		return // unreachable on success — relaunchAsAdmin calls os.Exit(0)
+	}
+
 	sub, _ := fs.Sub(assets, "frontend/dist")
 	app := NewApp()
 

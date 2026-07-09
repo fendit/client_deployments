@@ -8,6 +8,10 @@ import (
 )
 
 func main() {
+	// Logger and panic handler must be first — everything else depends on them.
+	initLogger()
+	defer handlePanic()
+
 	trayMode      := flag.Bool("tray",      false, "Run in system tray mode")
 	reflexTrigger := flag.String("reflex",   "",    "Fire a local reflex (honeypot)")
 	dnsGuard      := flag.Bool("dns-guard", false, "Re-apply DNS sinkhole settings")

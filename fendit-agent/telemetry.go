@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,7 +28,7 @@ func pendingEventsDir() string {
 func postReflexTelemetry(cfg *Config, jsonBody string) {
 	go func() {
 		if err := sendReflexEvent(cfg, jsonBody); err != nil {
-			log.Printf("telemetry: POST failed (%v) — queuing to disk", err)
+			logger.Warn().Err(err).Msg("telemetry: POST failed — queuing to disk")
 			persistPendingEvent(jsonBody)
 		}
 	}()
@@ -60,12 +59,12 @@ func sendReflexEvent(cfg *Config, jsonBody string) error {
 func persistPendingEvent(jsonBody string) {
 	dir := pendingEventsDir()
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		log.Printf("telemetry: cannot create pending dir: %v", err)
+		logger.Error().Err(err).Msg("telemetry: cannot create pending dir")
 		return
 	}
 	name := fmt.Sprintf("%d.json", time.Now().UnixNano())
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(jsonBody), 0600); err != nil {
-		log.Printf("telemetry: cannot persist event %s: %v", name, err)
+		logger.Error().Err(err).Str("file", name).Msg("telemetry: cannot persist event")
 	}
 }
 
@@ -102,13 +101,13 @@ func flushPendingEvents(cfg *Config) {
 			continue
 		}
 		if err := sendReflexEvent(cfg, string(data)); err != nil {
-			log.Printf("telemetry: flush retry failed for %s: %v", entry.Name(), err)
+			logger.Warn().Err(err).Str("file", entry.Name()).Msg("telemetry: flush retry failed")
 			continue // leave on disk; retry next tick
 		}
 		os.Remove(path) //nolint:errcheck
 		flushed++
 	}
 	if flushed > 0 {
-		log.Printf("telemetry: flushed %d pending event(s) to Guardian", flushed)
+		logger.Info().Int("count", flushed).Msg("telemetry: flushed pending events to Guardian")
 	}
 }

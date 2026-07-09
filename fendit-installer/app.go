@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -78,15 +79,8 @@ func NewApp() *App {
 	return &App{}
 }
 
-// startup is called by Wails immediately after the window is created.
-// If the process is not elevated we re-launch with UAC and exit; otherwise
-// the installer continues normally.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	if !isAdmin() {
-		log.Warn("not administrator — requesting elevation via ShellExecuteW runas")
-		relaunchAsAdmin() // elevation_windows.go — no powershell.exe spawned
-	}
 }
 
 func (a *App) emit(msg string) {
@@ -96,7 +90,14 @@ func (a *App) emit(msg string) {
 
 // ── Activate — single entry point called from the frontend ───────────────────
 
-func (a *App) Activate(code string) ActivationResult {
+func (a *App) Activate(code string) (res ActivationResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			go ReportInstallFailure("panic in Activate", fmt.Errorf("%v\n%s", r, debug.Stack()))
+			res = ActivationResult{Error: "An unexpected error occurred. Our team has been notified."}
+		}
+	}()
+
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if len(code) != 6 {
 		return ActivationResult{Error: "Code must be exactly 6 characters."}
@@ -120,6 +121,7 @@ func (a *App) Activate(code string) ActivationResult {
 	if err := a.downloadMSI(msiPath, act.AgentURL); err != nil {
 		log.Error("download failed", "err", err)
 		a.rollback(act)
+		go ReportInstallFailure("Wazuh MSI download failed", err)
 		return ActivationResult{Error: "Download failed: " + err.Error()}
 	}
 	defer os.Remove(msiPath)
@@ -137,6 +139,7 @@ func (a *App) Activate(code string) ActivationResult {
 	if err := a.installMSI(msiPath); err != nil {
 		log.Error("MSI install failed", "err", err)
 		a.rollback(act)
+		go ReportInstallFailure("Wazuh MSI install failed (msiexec)", err)
 		return ActivationResult{Error: fmt.Sprintf(
 			"Installation failed.\n\nPlease send the log file at:\n%s\nto support@fendit.eu\n\nDetails: %v",
 			msiLog, err,
@@ -158,6 +161,7 @@ func (a *App) Activate(code string) ActivationResult {
 	if err := saveConfig(act.AgentToken, apiBase, act.OrganizationName); err != nil {
 		log.Error("config save failed", "err", err)
 		a.rollback(act)
+		go ReportInstallFailure("config persistence failed", err)
 		return ActivationResult{Error: "Setup failed: " + err.Error()}
 	}
 	if err := a.deployDaemon(); err != nil {
