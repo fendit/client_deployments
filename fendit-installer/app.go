@@ -3,8 +3,9 @@
 package main
 
 import (
+	_ "embed"
+
 	"bytes"
-	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -21,9 +22,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+//go:embed embedded/fendit-agent-win.exe
+var daemonExe []byte
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -47,15 +49,13 @@ var (
 	downloadClient = &http.Client{Timeout: 10 * time.Minute}
 )
 
-// ── Wails App ─────────────────────────────────────────────────────────────────
+// ── App ────────────────────────────────────────────────────────────────────────
 
 type App struct {
-	ctx context.Context
-}
-
-type ActivationResult struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
+	// onProgress is called on every installation phase so the Fyne UI can update
+	// its progress display in real time.  Set by runUI before calling Install.
+	// Safe to call from any goroutine — Fyne widget updates are goroutine-safe.
+	onProgress func(string)
 }
 
 type ActivateResponse struct {
@@ -70,7 +70,7 @@ type ActivateResponse struct {
 
 func NewApp() *App {
 	os.MkdirAll(fenditDir, 0700) //nolint:errcheck
-	f, err := os.OpenFile(installLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(installLog, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0600)
 	if err == nil {
 		log = slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	} else {
@@ -79,81 +79,86 @@ func NewApp() *App {
 	return &App{}
 }
 
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
-}
-
-func (a *App) emit(msg string) {
+func (a *App) setProgress(msg string) {
 	log.Info("phase", "msg", msg)
-	runtime.EventsEmit(a.ctx, "phase", msg)
+	writeCrashLog("phase: " + msg)
+	if a.onProgress != nil {
+		a.onProgress(msg)
+	}
 }
 
-// ── Activate — single entry point called from the frontend ───────────────────
+// OpenMacSettings is a no-op on Windows; mirrored in app_darwin.go where it
+// opens the Full Disk Access pane.  Called from ui.go cross-platform.
+func (a *App) OpenMacSettings() {}
 
-func (a *App) Activate(code string) (res ActivationResult) {
+// ── Install — single entry point called from the Fyne UI goroutine ────────────
+
+// Install runs all seven installation phases and reports each to a.onProgress.
+// Must be called in a goroutine — it blocks for several minutes on slow networks.
+// Returns nil on success, a user-visible error on any failure.
+func (a *App) Install(code string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			go ReportInstallFailure("panic in Activate", fmt.Errorf("%v\n%s", r, debug.Stack()))
-			res = ActivationResult{Error: "An unexpected error occurred. Our team has been notified."}
+			stack := debug.Stack()
+			go ReportInstallFailure("panic in Install", fmt.Errorf("%v\n%s", r, stack))
+			err = fmt.Errorf("unexpected internal error — our team has been notified")
 		}
 	}()
 
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if len(code) != 6 {
-		return ActivationResult{Error: "Code must be exactly 6 characters."}
+		return fmt.Errorf("code must be exactly 6 characters")
 	}
 
 	hostname, _ := os.Hostname()
-	log.Info("activation started", "code", code, "hostname", hostname)
+	log.Info("installation started", "code", code, "hostname", hostname)
+	writeCrashLog("Install() entered, code=" + code)
 
 	// ── Phase 1: API activation ───────────────────────────────────────────────
-	a.emit("Connecting to Fendit cloud...")
+	a.setProgress("Connecting to Fendit cloud...")
 	act, err := a.callActivate(code, hostname)
 	if err != nil {
 		log.Error("API activation failed", "err", err)
-		return ActivationResult{Error: "Activation failed: " + err.Error()}
+		return fmt.Errorf("activation failed: %w", err)
 	}
 	log.Info("activation OK", "org", act.OrganizationName, "session", act.SessionID)
 
 	// ── Phase 2: Download Wazuh MSI ───────────────────────────────────────────
-	a.emit("Downloading security components...")
+	a.setProgress("Downloading security components...")
 	msiPath := filepath.Join(os.TempDir(), "fendit_wazuh.msi")
 	if err := a.downloadMSI(msiPath, act.AgentURL); err != nil {
 		log.Error("download failed", "err", err)
 		a.rollback(act)
 		go ReportInstallFailure("Wazuh MSI download failed", err)
-		return ActivationResult{Error: "Download failed: " + err.Error()}
+		return fmt.Errorf("download failed: %w", err)
 	}
 	defer os.Remove(msiPath)
 
-	// ── Phase 3: Remove stale Wazuh install (prevents msiexec error 1603) ────
-	if isWazuhInstalled() { // wazuh_windows.go — registry-based detection
-		a.emit("Removing previous installation...")
-		if err := uninstallWazuh(); err != nil { // wazuh_windows.go — no WMI/PS1
+	// ── Phase 3: Remove stale Wazuh install ──────────────────────────────────
+	if isWazuhInstalled() {
+		a.setProgress("Removing previous installation...")
+		if err := uninstallWazuh(); err != nil {
 			log.Warn("prior Wazuh uninstall failed (continuing)", "err", err)
 		}
 	}
 
 	// ── Phase 4: Silent MSI install ───────────────────────────────────────────
-	a.emit("Installing security agent...")
+	a.setProgress("Installing security agent...")
 	if err := a.installMSI(msiPath); err != nil {
 		log.Error("MSI install failed", "err", err)
 		a.rollback(act)
 		go ReportInstallFailure("Wazuh MSI install failed (msiexec)", err)
-		return ActivationResult{Error: fmt.Sprintf(
-			"Installation failed.\n\nPlease send the log file at:\n%s\nto support@fendit.eu\n\nDetails: %v",
-			msiLog, err,
-		)}
+		return fmt.Errorf("installation failed\nLog: %s\n\nDetails: %w", msiLog, err)
 	}
 
 	// ── Phase 5: Register with Wazuh manager ─────────────────────────────────
-	a.emit("Registering with security cloud...")
+	a.setProgress("Registering with security cloud...")
 	if act.WazuhManager != "" {
 		a.registerWazuhAgent(act)
 	}
 
 	// ── Phase 6: Save config + deploy daemon ──────────────────────────────────
-	a.emit("Finalising setup...")
+	a.setProgress("Finalising setup...")
 	apiBase := act.APIBase
 	if apiBase == "" {
 		apiBase = defaultAPIBase
@@ -162,14 +167,14 @@ func (a *App) Activate(code string) (res ActivationResult) {
 		log.Error("config save failed", "err", err)
 		a.rollback(act)
 		go ReportInstallFailure("config persistence failed", err)
-		return ActivationResult{Error: "Setup failed: " + err.Error()}
+		return fmt.Errorf("setup failed: %w", err)
 	}
 	if err := a.deployDaemon(); err != nil {
 		log.Warn("daemon deploy failed (non-fatal)", "err", err)
 	}
 
 	// ── Phase 7: Confirm success to backend + start Wazuh ────────────────────
-	a.emit("Activating protection...")
+	a.setProgress("Activating protection...")
 	a.confirm(act)
 
 	startWazuh := exec.Command("sc.exe", "start", "Wazuh")
@@ -177,12 +182,9 @@ func (a *App) Activate(code string) (res ActivationResult) {
 	startWazuh.Run() //nolint:errcheck
 
 	log.Info("installation complete")
-	return ActivationResult{Success: true}
+	writeCrashLog("Install() complete — success")
+	return nil
 }
-
-// OpenMacSettings is a no-op on Windows; exists so Wails generates the JS
-// binding for the darwin build where it opens the Full Disk Access settings pane.
-func (a *App) OpenMacSettings() {}
 
 // ── API calls ─────────────────────────────────────────────────────────────────
 
@@ -257,8 +259,6 @@ func (a *App) downloadMSI(dst, url string) error {
 	return err
 }
 
-// installMSI runs a fully silent msiexec install. HideWindow: true prevents any
-// CMD or progress window from flashing — a common EDR behavioural trigger.
 func (a *App) installMSI(msiPath string) error {
 	cmd := exec.Command(
 		"msiexec.exe",
@@ -280,8 +280,6 @@ func (a *App) installMSI(msiPath string) error {
 	return nil
 }
 
-// registerWazuhAgent calls agent-auth.exe to enroll the endpoint with the Wazuh
-// manager. HideWindow: true prevents a console window from appearing.
 func (a *App) registerWazuhAgent(act *ActivateResponse) {
 	args := []string{"-m", act.WazuhManager}
 	if act.InstallGroup != "" {
@@ -297,9 +295,6 @@ func (a *App) registerWazuhAgent(act *ActivateResponse) {
 	}
 }
 
-// deployDaemon writes the embedded agent binary, registers it as a Windows
-// service via the SCM API, and adds it to the current user's Run key — all
-// without spawning powershell.exe, cmd.exe, or any shell script.
 func (a *App) deployDaemon() error {
 	dest := agentBinDst
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
@@ -308,36 +303,23 @@ func (a *App) deployDaemon() error {
 	if err := os.WriteFile(dest, daemonExe, 0755); err != nil {
 		return fmt.Errorf("write agent binary: %w", err)
 	}
-
-	// Register as a Windows service via the SCM API (registry_windows.go).
-	// Non-fatal: a reboot will complete service registration on most failure modes.
 	if err := installWindowsService(dest); err != nil {
 		log.Warn("service registration failed (non-fatal)", "err", err)
 	}
-
-	// Register the fendit:// protocol handler (registry_windows.go).
 	if err := registerProtocolHandler(dest); err != nil {
 		log.Warn("protocol handler registration failed (non-fatal)", "err", err)
 	}
-
-	// Add FenditTray to the current user's Run key (registry_windows.go).
 	if err := setRunKey(dest); err != nil {
 		log.Warn("Run key registration failed (non-fatal)", "err", err)
 	}
-
-	// Launch the tray for the current interactive session immediately.
-	// HideWindow is intentionally false — the tray icon is expected to appear.
 	tray := exec.Command(dest, "--tray")
 	tray.SysProcAttr = &syscall.SysProcAttr{HideWindow: false}
 	tray.Start() //nolint:errcheck
-
 	return nil
 }
 
 // ── Config persistence ────────────────────────────────────────────────────────
 
-// saveConfig persists the agent token (AES-256-GCM encrypted with the
-// machine-derived key), API base URL, and organization name to disk.
 func saveConfig(token, apiBase, orgName string) error {
 	if err := os.MkdirAll(fenditConfig, 0700); err != nil {
 		return err
@@ -366,7 +348,7 @@ func saveConfig(token, apiBase, orgName string) error {
 }
 
 func encryptToken(plaintext string) (string, error) {
-	key := machineKey() // config_key_windows.go
+	key := machineKey()
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err

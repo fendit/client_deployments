@@ -99,17 +99,26 @@ func ReportInstallFailure(errorContext string, cause error) {
 	resp.Body.Close()
 }
 
-// handleInstallerPanic must be called as the very first defer in main().
-// It catches any unhandled panic that escapes wails.Run(), fires a synchronous
-// last-gasp telemetry report (capped at reportDeadline), then exits with code 2.
+// handleInstallerPanic is deferred as the second statement in main() (after
+// initCrashGuard opens the crash log file).
+//
+// Execution order on panic:
+//  1. Write full stack trace to %TEMP%\fendit-crash.log  — local, guaranteed.
+//  2. Show a Win32 MessageBox (Windows) so the user knows something went wrong
+//     and where to find the log.
+//  3. Fire a network telemetry POST to the backend (best-effort, 3 s timeout).
+//  4. os.Exit(2).
+//
+// Steps 1 and 2 are synchronous and happen before any network I/O so the user
+// always gets a local artifact even when offline.
 func handleInstallerPanic() {
 	r := recover()
 	if r == nil {
 		return
 	}
-	ReportInstallFailure(
-		"unhandled panic",
-		fmt.Errorf("%v\n%s", r, debug.Stack()),
-	)
+	stack := debug.Stack()
+	writeCrashLog(fmt.Sprintf("PANIC: %v\n%s", r, stack))
+	showCrashBox(crashLogPath)
+	ReportInstallFailure("unhandled panic", fmt.Errorf("%v\n%s", r, stack))
 	os.Exit(2)
 }

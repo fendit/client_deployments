@@ -2,59 +2,27 @@
 
 package main
 
-import (
-	"embed"
-	"io/fs"
-
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	"github.com/wailsapp/wails/v2/pkg/options/windows"
-)
-
-//go:embed all:frontend/dist
-var assets embed.FS
-
-// daemonExe is the headless agent binary placed in embedded/ by build_all.sh.
-//
-//go:embed embedded/fendit-agent-win.exe
-var daemonExe []byte
-
 func main() {
-	// Panic handler must be the first defer so it wraps everything that follows,
-	// including wails.Run(). It fires a last-gasp telemetry POST before os.Exit.
+	// Layer 1 — crash log + stdio redirect to %TEMP%\fendit-crash.log / fendit-debug.log.
+	// Must be the absolute first call: before any defer, before elevation, before UI.
+	// Opens both log files so we have a trace even for OS-level aborts that bypass recover().
+	initCrashGuard()
+
+	// Layer 2 — Go panic handler.
+	// Registered after initCrashGuard so crashLogFile is already open when it fires.
 	defer handleInstallerPanic()
 
-	// Elevation MUST be checked before wails.Run(). If os.Exit is called after
-	// WebView2 has started, Chrome_WidgetWin_0 remains registered while its
-	// HWND still exists; UnregisterClass in the WebView2 DLL teardown then
-	// fails with ERROR_CLASS_HAS_WINDOWS (Win32 error 1412).
+	// Elevation must happen before the Fyne window opens.
+	// os.Exit here is safe because no GUI has started yet — no window class to leak.
+	writeCrashLog("checkpoint: elevation check")
 	if !isAdmin() {
 		relaunchAsAdmin()
-		return // unreachable on success — relaunchAsAdmin calls os.Exit(0)
+		return
 	}
 
-	sub, _ := fs.Sub(assets, "frontend/dist")
-	app := NewApp()
-
-	wails.Run(&options.App{ //nolint:errcheck
-		Title:            "Fendit Security",
-		Width:            450,
-		Height:           600,
-		DisableResize:    true,
-		Frameless:        true,
-		BackgroundColour: &options.RGBA{R: 15, G: 15, B: 24, A: 255},
-		CSSDragProperty:  "--wails-draggable",
-		CSSDragValue:     "drag",
-		AssetServer: &assetserver.Options{
-			Assets: sub,
-		},
-		Windows: &windows.Options{
-			WebviewIsTransparent: false,
-			WindowIsTranslucent:  false,
-			DisableWindowIcon:    true,
-		},
-		OnStartup: app.startup,
-		Bind:      []interface{}{app},
-	})
+	// Probe WebView2 / other heavy DLLs here if needed in the future.
+	// Currently a no-op — Fyne has no WebView2 dependency.
+	writeCrashLog("checkpoint: calling runUI")
+	runUI()
+	writeCrashLog("checkpoint: runUI returned (normal exit)")
 }

@@ -2,10 +2,11 @@
 # Fendit Build Pipeline
 #
 # Outputs:
-#   release/windows/fendit_base.exe  — Wails GUI installer (Windows amd64)
-#   release/osx/fendit_base.pkg      — Wails GUI installer (macOS universal, pkg-wrapped)
+#   release/windows/fendit_base.exe  — Fyne GUI installer (Windows amd64)
+#   release/osx/fendit_base.pkg      — Fyne GUI installer (macOS universal, pkg-wrapped)
 #
-# Prerequisites: go, wails, node, npm, pkgbuild, lipo, mingw-w64
+# Prerequisites (macOS arm64 runner):
+#   go, pkgbuild, lipo, sips, iconutil, x86_64-w64-mingw32-gcc
 
 set -euo pipefail
 
@@ -14,7 +15,7 @@ AGENT_SRC="fendit-agent"
 OUT_DIR="release"
 MAC_OUT="$OUT_DIR/osx"
 WIN_OUT="$OUT_DIR/windows"
-TMP_PKG_DIR="tmp_pkg_build"
+TMP_DIR="tmp_build"
 
 # Strip leading 'v' from git tag so pkgbuild gets a clean semver string.
 VERSION="${VERSION:-1.0.0}"
@@ -23,7 +24,7 @@ VERSION="${VERSION#v}"
 echo "Fendit Build Pipeline — v${VERSION}"
 
 # ── Sanity checks ─────────────────────────────────────────────────────────────
-for cmd in go wails node npm pkgbuild lipo x86_64-w64-mingw32-gcc; do
+for cmd in go pkgbuild lipo sips iconutil x86_64-w64-mingw32-gcc; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "ERROR: '$cmd' not found. Install missing tools before running this script."
     exit 1
@@ -31,13 +32,14 @@ for cmd in go wails node npm pkgbuild lipo x86_64-w64-mingw32-gcc; do
 done
 
 # ── Clean slate ───────────────────────────────────────────────────────────────
-rm -rf "$OUT_DIR" "$TMP_PKG_DIR"
-mkdir -p "$MAC_OUT" "$WIN_OUT" "$TMP_PKG_DIR/payload" "$TMP_PKG_DIR/scripts"
+rm -rf "$OUT_DIR" "$TMP_DIR" tmp_pkg_build  # tmp_pkg_build = legacy name
+mkdir -p "$MAC_OUT" "$WIN_OUT"
+mkdir -p "$TMP_DIR/payload" "$TMP_DIR/scripts" "$TMP_DIR/iconset"
 mkdir -p "${INSTALLER_SRC}/embedded"
 
 # ── Step 0: Generate macOS template tray icon ─────────────────────────────────
-# sips is macOS-built-in. It converts the 512×512 appicon.png to a 22×22 PNG
-# that NSImage renders as a template (auto light/dark menu-bar colour).
+# sips converts the 1024×1024 appicon.png to the 22×22 PNG that the macOS
+# menu bar renders as a template image (auto light/dark adaptation).
 echo "[0/6] Generating macOS tray icon..."
 sips -s format png \
      --resampleWidth 22 \
@@ -46,23 +48,9 @@ sips -s format png \
      2>/dev/null \
   || echo "  WARNING: sips failed — using existing icon_template.png if present."
 
-# ── CRITICAL: compile ALL agent binaries before any wails build ───────────────
-#
-# Wails' "Generating bindings" step compiles the installer package for the HOST
-# (darwin/arm64) even when the TARGET is windows/amd64. That host compilation
-# processes main_darwin.go which contains:
-#
-#   //go:embed embedded/fendit-agent-mac
-#   var daemonExe []byte
-#
-# If embedded/fendit-agent-mac does not already exist as a regular FILE at that
-# point, Wails / Go creates an EMPTY DIRECTORY at that path as a placeholder.
-# The subsequent lipo call then fails with "Is a directory".
-#
-# Compiling all agent slices first guarantees both embedded paths are real
-# binary files before any wails build command executes.
-
-# ── Step 1: Compile macOS agent (arm64 + amd64) and merge ────────────────────
+# ── Step 1: Compile macOS agent (arm64 + amd64 → universal) ──────────────────
+# Both slices must be real files before the installer embedding step runs —
+# otherwise go:embed sees a missing file and aborts.
 echo "[1/6] Compiling macOS agent daemon (arm64 + amd64 → universal)..."
 
 ( cd "$AGENT_SRC" && \
@@ -71,9 +59,9 @@ echo "[1/6] Compiling macOS agent daemon (arm64 + amd64 → universal)..."
 
 ( cd "$AGENT_SRC" && \
   CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+  CC="clang -arch x86_64" \
   go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/embedded/fendit-agent-amd64" . )
 
-# Remove any stale file or directory before lipo writes the output.
 rm -rf "${INSTALLER_SRC}/embedded/fendit-agent-mac"
 lipo -create \
     "${INSTALLER_SRC}/embedded/fendit-agent-arm64" \
@@ -83,55 +71,105 @@ chmod +x "${INSTALLER_SRC}/embedded/fendit-agent-mac"
 rm -f "${INSTALLER_SRC}/embedded/fendit-agent-arm64" \
       "${INSTALLER_SRC}/embedded/fendit-agent-amd64"
 
-# ── Step 2: Cross-compile agent daemon for Windows ────────────────────────────
+# ── Step 2: Cross-compile Windows agent ──────────────────────────────────────
 echo "[2/6] Compiling Windows agent daemon..."
 ( cd "$AGENT_SRC" && \
   CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
   go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/embedded/fendit-agent-win.exe" . )
 
-# ── Step 3: Build Windows installer via Wails ─────────────────────────────────
-# Both embedded binaries now exist as regular files.
-# Wails' binding-generation step will find them and not create directories.
-echo "[3/6] Building Windows installer via Wails..."
+# ── Step 3: Build Windows installer (Fyne) ───────────────────────────────────
+# CGO required for Fyne (OpenGL). -H windowsgui suppresses the console window.
+# Both embedded/* files must exist before this step (done above).
+echo "[3/6] Building Windows installer (Fyne/Go → amd64)..."
 ( cd "$INSTALLER_SRC" && \
-  CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 \
-  wails build -platform windows/amd64 -clean )
+  CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
+  go build \
+    -ldflags "-H windowsgui -s -w" \
+    -o "../$WIN_OUT/fendit_base.exe" \
+    . )
 
-cp "${INSTALLER_SRC}/build/bin/fendit-installer.exe" "$WIN_OUT/fendit_base.exe"
 rm -f "${INSTALLER_SRC}/embedded/fendit-agent-win.exe"
 
-# ── Step 4: Build macOS installer via Wails (universal) ───────────────────────
-# darwin/universal produces a fat .app that runs natively on Apple Silicon and
-# Intel without Rosetta 2 emulation.
-echo "[4/6] Building macOS installer via Wails (universal)..."
-( cd "$INSTALLER_SRC" && wails build -platform darwin/universal -clean )
+# ── Step 4: Build macOS installer (Fyne, arm64 + amd64 → universal) ──────────
+# Fyne requires CGO on macOS (OpenGL + Cocoa). Cross-compiling amd64 from an
+# arm64 host requires explicitly targeting x86_64 in the C toolchain.
+echo "[4/6] Building macOS installer (Fyne/Go → universal)..."
+( cd "$INSTALLER_SRC" && \
+  CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+  go build -ldflags "-s -w" -o "../$TMP_DIR/installer-arm64" . )
 
-rm -f "${INSTALLER_SRC}/embedded/fendit-agent-mac"
+( cd "$INSTALLER_SRC" && \
+  CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+  CC="clang -arch x86_64" \
+  go build -ldflags "-s -w" -o "../$TMP_DIR/installer-amd64" . )
 
-APP_BUNDLE=$(find "${INSTALLER_SRC}/build/bin" -maxdepth 1 -name "*.app" | head -1)
-if [ -z "$APP_BUNDLE" ]; then
-  echo "ERROR: No .app bundle found in ${INSTALLER_SRC}/build/bin/ after wails build."
-  exit 1
-fi
-echo "  Found: $APP_BUNDLE"
+lipo -create \
+    "$TMP_DIR/installer-arm64" \
+    "$TMP_DIR/installer-amd64" \
+    -output "$TMP_DIR/fendit-installer"
+chmod +x "$TMP_DIR/fendit-installer"
+rm -f "${INSTALLER_SRC}/embedded/fendit-agent-mac" \
+      "$TMP_DIR/installer-arm64" \
+      "$TMP_DIR/installer-amd64"
 
-# ── Step 5: Package macOS .app into a distributable .pkg ─────────────────────
-echo "[5/6] Packaging macOS .pkg..."
-cp -r "$APP_BUNDLE" "$TMP_PKG_DIR/payload/"
-cp pkg_scripts/postinstall "$TMP_PKG_DIR/scripts/postinstall"
-chmod +x "$TMP_PKG_DIR/scripts/postinstall"
+# ── Step 5: Package macOS .app bundle → .pkg ─────────────────────────────────
+echo "[5/6] Packaging macOS .app..."
+
+# Build icon.icns from the 1024×1024 appicon.png.
+SRC_ICON="${INSTALLER_SRC}/build/appicon.png"
+ICONSET="$TMP_DIR/iconset"
+for size in 16 32 128 256 512; do
+  sips -z $size $size "$SRC_ICON" \
+    --out "${ICONSET}/icon_${size}x${size}.png" 2>/dev/null
+  double=$((size * 2))
+  [ $double -le 1024 ] && \
+    sips -z $double $double "$SRC_ICON" \
+      --out "${ICONSET}/icon_${size}x${size}@2x.png" 2>/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$TMP_DIR/icon.icns"
+
+# Assemble the .app bundle directory tree.
+APP_BUNDLE="$TMP_DIR/payload/Fendit Security.app"
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/Resources"
+
+cp "$TMP_DIR/fendit-installer"  "$APP_BUNDLE/Contents/MacOS/fendit-installer"
+cp "$TMP_DIR/icon.icns"         "$APP_BUNDLE/Contents/Resources/icon.icns"
+
+cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>fendit-installer</string>
+  <key>CFBundleIconFile</key><string>icon</string>
+  <key>CFBundleIdentifier</key><string>eu.fendit.installer</string>
+  <key>CFBundleName</key><string>Fendit Security</string>
+  <key>CFBundleDisplayName</key><string>Fendit Security</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSRequiresAquaSystemAppearance</key><false/>
+</dict></plist>
+PLIST
+
+# Postinstall script opens the app in the console user's session.
+cp pkg_scripts/postinstall "$TMP_DIR/scripts/postinstall"
+chmod +x "$TMP_DIR/scripts/postinstall"
 
 pkgbuild \
-  --root             "$TMP_PKG_DIR/payload" \
-  --scripts          "$TMP_PKG_DIR/scripts" \
+  --root             "$TMP_DIR/payload" \
+  --scripts          "$TMP_DIR/scripts" \
   --identifier       "eu.fendit.installer" \
   --version          "${VERSION}" \
   --install-location "/Applications" \
   "$MAC_OUT/fendit_base.pkg"
 
-# ── Step 6: Clean up ─────────────────────────────────────────────────────────
+# ── Step 6: Clean up ──────────────────────────────────────────────────────────
 echo "[6/6] Cleaning up..."
-rm -rf "$TMP_PKG_DIR"
+rm -rf "$TMP_DIR"
 
 echo ""
 echo "Build complete!"

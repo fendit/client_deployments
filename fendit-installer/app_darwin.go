@@ -3,8 +3,9 @@
 package main
 
 import (
+	_ "embed"
+
 	"bytes"
-	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -21,9 +22,10 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
-
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+//go:embed embedded/fendit-agent-mac
+var daemonExe []byte
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -51,15 +53,10 @@ var (
 	downloadClient = &http.Client{Timeout: 10 * time.Minute}
 )
 
-// ── Wails App ─────────────────────────────────────────────────────────────────
+// ── App ────────────────────────────────────────────────────────────────────────
 
 type App struct {
-	ctx context.Context
-}
-
-type ActivationResult struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
+	onProgress func(string)
 }
 
 type ActivateResponse struct {
@@ -74,7 +71,7 @@ type ActivateResponse struct {
 
 func NewApp() *App {
 	os.MkdirAll(fenditDir, 0700) //nolint:errcheck
-	f, err := os.OpenFile(installLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(installLog, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0600)
 	if err == nil {
 		log = slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	} else {
@@ -83,16 +80,18 @@ func NewApp() *App {
 	return &App{}
 }
 
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
-}
-
-func (a *App) emit(msg string) {
+func (a *App) setProgress(msg string) {
 	log.Info("phase", "msg", msg)
-	runtime.EventsEmit(a.ctx, "phase", msg)
+	if a.onProgress != nil {
+		a.onProgress(msg)
+	}
 }
 
-// ── Activate — single entry point called from the frontend ───────────────────
+// OpenMacSettings opens the Full Disk Access pane in System Settings.
+// Called from ui.go when Install returns "fda_required".
+func (a *App) OpenMacSettings() {
+	exec.Command("open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles").Start() //nolint:errcheck
+}
 
 // hasFDA probes the TCC database, which is readable only when Full Disk Access
 // has been granted. Even root cannot open this file without FDA.
@@ -105,77 +104,77 @@ func hasFDA() bool {
 	return true
 }
 
-func (a *App) Activate(code string) (res ActivationResult) {
+// ── Install ────────────────────────────────────────────────────────────────────
+
+func (a *App) Install(code string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			go ReportInstallFailure("panic in Activate", fmt.Errorf("%v\n%s", r, debug.Stack()))
-			res = ActivationResult{Error: "An unexpected error occurred. Our team has been notified."}
+			stack := debug.Stack()
+			go ReportInstallFailure("panic in Install", fmt.Errorf("%v\n%s", r, stack))
+			err = fmt.Errorf("unexpected internal error — our team has been notified")
 		}
 	}()
 
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if len(code) != 6 {
-		return ActivationResult{Error: "Code must be exactly 6 characters."}
+		return fmt.Errorf("code must be exactly 6 characters")
 	}
 
 	// Full Disk Access is required for the agent to monitor protected paths.
-	// Open the exact settings pane and let the frontend show the guidance screen.
+	// Return the sentinel string so ui.go can show the dedicated FDA screen.
 	if !hasFDA() {
 		exec.Command("open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles").Start() //nolint:errcheck
-		return ActivationResult{Error: "fda_required"}
+		return fmt.Errorf("fda_required")
 	}
 
 	hostname, _ := os.Hostname()
-	log.Info("activation started", "code", code, "hostname", hostname)
+	log.Info("installation started", "code", code, "hostname", hostname)
 
 	// ── Phase 1: API activation ───────────────────────────────────────────────
-	a.emit("Connecting to Fendit cloud...")
+	a.setProgress("Connecting to Fendit cloud...")
 	act, err := a.callActivate(code, hostname)
 	if err != nil {
 		log.Error("API activation failed", "err", err)
-		return ActivationResult{Error: "Activation failed: " + err.Error()}
+		return fmt.Errorf("activation failed: %w", err)
 	}
 	log.Info("activation OK", "org", act.OrganizationName, "session", act.SessionID)
 
 	// ── Phase 2: Download Wazuh PKG ───────────────────────────────────────────
-	a.emit("Downloading security components...")
+	a.setProgress("Downloading security components...")
 	pkgPath := filepath.Join(os.TempDir(), "fendit_wazuh.pkg")
 	if err := a.downloadPKG(pkgPath, act.AgentURL); err != nil {
 		log.Error("download failed", "err", err)
 		a.rollback(act)
 		go ReportInstallFailure("Wazuh PKG download failed", err)
-		return ActivationResult{Error: "Download failed: " + err.Error()}
+		return fmt.Errorf("download failed: %w", err)
 	}
 	defer os.Remove(pkgPath)
 
-	// ── Phase 3: Remove stale Wazuh install if present ───────────────────────
-	if isWazuhInstalled() { // wazuh_darwin.go — checks /Library/Ossec
-		a.emit("Removing previous installation...")
-		if err := uninstallWazuh(); err != nil { // wazuh_darwin.go — uninstall.sh or pkgutil
+	// ── Phase 3: Remove stale Wazuh install ──────────────────────────────────
+	if isWazuhInstalled() {
+		a.setProgress("Removing previous installation...")
+		if err := uninstallWazuh(); err != nil {
 			log.Warn("prior Wazuh uninstall failed (continuing)", "err", err)
 		}
 	}
 
 	// ── Phase 4: Silent PKG install ───────────────────────────────────────────
-	a.emit("Installing security agent...")
+	a.setProgress("Installing security agent...")
 	if err := a.installPKG(pkgPath); err != nil {
 		log.Error("PKG install failed", "err", err)
 		a.rollback(act)
 		go ReportInstallFailure("Wazuh PKG install failed (installer)", err)
-		return ActivationResult{Error: fmt.Sprintf(
-			"Installation failed.\n\nPlease send the log at:\n%s\nto support@fendit.eu\n\nDetails: %v",
-			installLog, err,
-		)}
+		return fmt.Errorf("installation failed — please send %s to support@fendit.eu\n\nDetails: %w", installLog, err)
 	}
 
 	// ── Phase 5: Register with Wazuh manager ─────────────────────────────────
-	a.emit("Registering with security cloud...")
+	a.setProgress("Registering with security cloud...")
 	if act.WazuhManager != "" {
 		a.registerWazuhAgent(act)
 	}
 
 	// ── Phase 6: Save config + deploy daemon ──────────────────────────────────
-	a.emit("Finalising setup...")
+	a.setProgress("Finalising setup...")
 	apiBase := act.APIBase
 	if apiBase == "" {
 		apiBase = defaultAPIBase
@@ -184,26 +183,19 @@ func (a *App) Activate(code string) (res ActivationResult) {
 		log.Error("config save failed", "err", err)
 		a.rollback(act)
 		go ReportInstallFailure("config persistence failed", err)
-		return ActivationResult{Error: "Setup failed: " + err.Error()}
+		return fmt.Errorf("setup failed: %w", err)
 	}
 	if err := a.deployDaemon(); err != nil {
 		log.Warn("daemon deploy failed (non-fatal)", "err", err)
 	}
 
-	// ── Phase 7: Confirm success to backend + start Wazuh ────────────────────
-	a.emit("Activating protection...")
+	// ── Phase 7: Confirm success + start Wazuh ────────────────────────────────
+	a.setProgress("Activating protection...")
 	a.confirm(act)
 	exec.Command(wazuhCtlBin, "start").Run() //nolint:errcheck
 
 	log.Info("installation complete")
-	return ActivationResult{Success: true}
-}
-
-// OpenMacSettings opens the Full Disk Access pane in System Settings.
-// Called from the frontend FDA screen as a fail-safe when the user closes the
-// settings window that was auto-opened by the fda_required gate in Activate().
-func (a *App) OpenMacSettings() {
-	exec.Command("open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles").Start() //nolint:errcheck
+	return nil
 }
 
 // ── API calls ─────────────────────────────────────────────────────────────────
@@ -279,9 +271,6 @@ func (a *App) downloadPKG(dst, url string) error {
 	return err
 }
 
-// installPKG runs /usr/sbin/installer for a fully silent PKG install.
-// Equivalent to msiexec /qn on Windows — the process runs synchronously and
-// the caller blocks until the installation is complete.
 func (a *App) installPKG(pkgPath string) error {
 	cmd := exec.Command("/usr/sbin/installer", "-pkg", pkgPath, "-target", "/")
 	out, err := cmd.CombinedOutput()
@@ -296,7 +285,6 @@ func (a *App) installPKG(pkgPath string) error {
 	return nil
 }
 
-// registerWazuhAgent calls agent-auth to enrol this endpoint with the Wazuh manager.
 func (a *App) registerWazuhAgent(act *ActivateResponse) {
 	args := []string{"-m", act.WazuhManager}
 	if act.InstallGroup != "" {
@@ -310,39 +298,25 @@ func (a *App) registerWazuhAgent(act *ActivateResponse) {
 	}
 }
 
-// deployDaemon writes the embedded agent binary, creates honeypot decoys,
-// installs the launchd LaunchDaemon and LaunchAgent plists, and bootstraps the
-// service — all without spawning shell scripts or sudo invocations.
-// The installer already runs as root (relaunchAsAdmin in startup()).
 func (a *App) deployDaemon() error {
-	// Write the embedded agent binary.
 	if err := os.MkdirAll(filepath.Dir(agentBinDst), 0755); err != nil {
 		return fmt.Errorf("create agent dir: %w", err)
 	}
 	if err := os.WriteFile(agentBinDst, daemonExe, 0755); err != nil {
 		return fmt.Errorf("write agent binary: %w", err)
 	}
-
-	// Create honeypot decoy files.
 	if err := a.createHoneypotDecoys(); err != nil {
 		log.Warn("honeypot decoy creation failed (non-fatal)", "err", err)
 	}
-
-	// Install the main agent LaunchDaemon.
 	if err := a.installAgentPlist(); err != nil {
 		return fmt.Errorf("install agent launchd: %w", err)
 	}
-
-	// Install the honeypot WatchPaths plist (secondary trigger).
 	if err := a.installHoneypotPlist(); err != nil {
 		log.Warn("honeypot plist install failed (non-fatal)", "err", err)
 	}
-
-	// Install and bootstrap the tray LaunchAgent for the console user.
 	if err := a.installTrayPlist(); err != nil {
 		log.Warn("tray plist install failed (non-fatal)", "err", err)
 	}
-
 	return nil
 }
 
@@ -385,7 +359,7 @@ func (a *App) installAgentPlist() error {
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return fmt.Errorf("write agent plist: %w", err)
 	}
-	exec.Command("launchctl", "bootout", "system", plistPath).Run() //nolint:errcheck — unload any stale instance
+	exec.Command("launchctl", "bootout", "system", plistPath).Run() //nolint:errcheck
 	return exec.Command("launchctl", "bootstrap", "system", plistPath).Run()
 }
 
@@ -431,7 +405,6 @@ func (a *App) installTrayPlist() error {
 	if err := os.WriteFile(plistPath, []byte(trayPlist), 0644); err != nil {
 		return fmt.Errorf("write tray plist: %w", err)
 	}
-	// Bootstrap the tray in the console user's graphical session.
 	if user := consoleUsername(); user != "" && user != "root" {
 		if uid := consoleUID(user); uid != "" {
 			exec.Command("launchctl", "bootstrap", "user/"+uid, plistPath).Run() //nolint:errcheck
@@ -440,7 +413,6 @@ func (a *App) installTrayPlist() error {
 	return nil
 }
 
-// consoleUsername returns the name of the currently logged-in console user.
 func consoleUsername() string {
 	out, err := exec.Command("stat", "-f", "%Su", "/dev/console").Output()
 	if err != nil {
@@ -449,7 +421,6 @@ func consoleUsername() string {
 	return strings.TrimSpace(string(out))
 }
 
-// consoleUID returns the numeric UID string for a given username.
 func consoleUID(username string) string {
 	out, err := exec.Command("id", "-u", username).Output()
 	if err != nil {
@@ -460,15 +431,10 @@ func consoleUID(username string) string {
 
 // ── Config persistence ────────────────────────────────────────────────────────
 
-// saveConfig persists the agent token (AES-256-GCM encrypted with the
-// machine-derived key), API base URL, and organization name to disk.
-// Writes to /Library/Fendit/config — the same path loadConfig() reads in the
-// fendit-agent binary.
 func saveConfig(token, apiBase, orgName string) error {
 	if err := os.MkdirAll(fenditConfig, 0700); err != nil {
 		return err
 	}
-	// Lock the config directory to root:wheel.
 	os.Chmod(fenditConfig, 0700) //nolint:errcheck
 	os.Chown(fenditConfig, 0, 0) //nolint:errcheck
 
@@ -496,7 +462,7 @@ func saveConfig(token, apiBase, orgName string) error {
 }
 
 func encryptToken(plaintext string) (string, error) {
-	key := machineKey() // config_key_darwin.go — ioreg IOPlatformUUID
+	key := machineKey()
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err

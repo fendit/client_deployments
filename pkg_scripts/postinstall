@@ -1,11 +1,11 @@
 #!/bin/bash
-# postinstall — runs as root after fendit_base.pkg installs FenditInstaller.app.
+# postinstall — runs as root after fendit_base.pkg installs Fendit Security.app.
 # Opens the Fendit installer in the console user's graphical session so the
 # activation UI appears without requiring a separate manual launch.
 
 set -e
 
-APP_PATH="/Applications/FenditInstaller.app"
+APP_PATH="/Applications/Fendit Security.app"
 
 # Determine the console user (the person who initiated the pkg install).
 CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || true)
@@ -13,8 +13,8 @@ CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null || true)
 if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
   CONSOLE_UID=$(id -u "$CONSOLE_USER" 2>/dev/null || true)
   if [ -n "$CONSOLE_UID" ]; then
-    # Launch the app in the user's own graphical session so the Wails window
-    # renders correctly. The app's startup() will request elevation via osascript.
+    # Launch the app in the user's own graphical session so the Fyne window
+    # renders correctly. The app requests elevation via osascript on first launch.
     launchctl asuser "$CONSOLE_UID" open -a "$APP_PATH"
     exit 0
   fi
