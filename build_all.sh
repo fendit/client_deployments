@@ -34,16 +34,16 @@ done
 # ── Clean slate ───────────────────────────────────────────────────────────────
 rm -rf "$OUT_DIR" "$TMP_DIR" tmp_pkg_build  # tmp_pkg_build = legacy name
 mkdir -p "$MAC_OUT" "$WIN_OUT"
-mkdir -p "$TMP_DIR/payload" "$TMP_DIR/scripts" "$TMP_DIR/iconset"
+mkdir -p "$TMP_DIR/payload" "$TMP_DIR/scripts" "$TMP_DIR/fendit.iconset"
 mkdir -p "${INSTALLER_SRC}/embedded"
 
 # ── Step 0: Generate macOS template tray icon ─────────────────────────────────
-# sips converts the 1024×1024 appicon.png to the 22×22 PNG that the macOS
+# sips converts the Fendit logo to the 22×22 PNG that the macOS
 # menu bar renders as a template image (auto light/dark adaptation).
 echo "[0/6] Generating macOS tray icon..."
 sips -s format png \
      --resampleWidth 22 \
-     "${INSTALLER_SRC}/build/appicon.png" \
+     "${INSTALLER_SRC}/assets/fendit.png" \
      --out "${AGENT_SRC}/icon_template.png" \
      2>/dev/null \
   || echo "  WARNING: sips failed — using existing icon_template.png if present."
@@ -115,9 +115,9 @@ rm -f "${INSTALLER_SRC}/embedded/fendit-agent-mac" \
 # ── Step 5: Package macOS .app bundle → .pkg ─────────────────────────────────
 echo "[5/6] Packaging macOS .app..."
 
-# Build icon.icns from the 1024×1024 appicon.png.
-SRC_ICON="${INSTALLER_SRC}/build/appicon.png"
-ICONSET="$TMP_DIR/iconset"
+# Build icon.icns from the Fendit logo (single source of truth).
+SRC_ICON="${INSTALLER_SRC}/assets/fendit.png"
+ICONSET="$TMP_DIR/fendit.iconset"
 for size in 16 32 128 256 512; do
   sips -z $size $size "$SRC_ICON" \
     --out "${ICONSET}/icon_${size}x${size}.png" 2>/dev/null
