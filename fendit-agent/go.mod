@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/getlantern/systray v1.2.2
+	github.com/gorilla/websocket v1.5.3
 	github.com/hectane/go-acl v1.0.0
 	github.com/kardianos/service v1.2.2
 	golang.org/x/sys v0.46.0

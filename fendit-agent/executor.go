@@ -25,11 +25,16 @@ type Intent struct {
 }
 
 // ActionResult is posted back to /v1/actions/result after execution.
+// QuarantineID, OriginalPath, and SHA256 are populated for quarantine actions
+// so Guardian can persist the vault record in the database.
 type ActionResult struct {
-	IntentID string `json:"intent_id"`
-	Success  bool   `json:"success"`
-	Output   string `json:"output,omitempty"`
-	Error    string `json:"error,omitempty"`
+	IntentID     string `json:"intent_id"`
+	Success      bool   `json:"success"`
+	Output       string `json:"output,omitempty"`
+	Error        string `json:"error,omitempty"`
+	QuarantineID string `json:"quarantine_id,omitempty"`
+	OriginalPath string `json:"original_path,omitempty"`
+	SHA256       string `json:"sha256,omitempty"`
 }
 
 // allowedActions is the hard-coded allowlist. Any action not in this set is
@@ -42,6 +47,7 @@ var allowedActions = map[string]bool{
 	"isolate":         true,
 	"unisolate":       true,
 	"quarantine":      true,
+	"restore":         true,
 }
 
 // Execute dispatches the intent using OS-native commands.
@@ -83,6 +89,8 @@ func (i *Intent) Execute() ActionResult {
 		return i.executeUnisolate(ctx)
 	case "quarantine":
 		return i.executeQuarantine()
+	case "restore":
+		return i.executeRestore()
 	default:
 		return ActionResult{
 			IntentID: i.ID,
@@ -321,8 +329,9 @@ func (i *Intent) runSequential(ctx context.Context, cmds [][]string) ActionResul
 
 // ── Quarantine ────────────────────────────────────────────────────────────────
 
-// executeQuarantine moves a file to the platform quarantine directory and strips
-// all permissions so it cannot be executed or read without elevated rights.
+// executeQuarantine moves a file to the platform quarantine directory, strips
+// all permissions so it cannot be re-executed, and records the operation in
+// the local vault index so it can be restored later.
 func (i *Intent) executeQuarantine() ActionResult {
 	src, err := argStr(i.Args, "filepath")
 	if err != nil {
@@ -333,6 +342,14 @@ func (i *Intent) executeQuarantine() ActionResult {
 		return ActionResult{IntentID: i.ID, Success: false, Error: "invalid filepath"}
 	}
 
+	absPath, err := filepath.Abs(src)
+	if err != nil {
+		return ActionResult{IntentID: i.ID, Success: false, Error: "abs path: " + err.Error()}
+	}
+
+	// Hash before moving — file will be gone from its original location after.
+	sha256Hex := hashFileSHA256(absPath)
+
 	qDir := quarantineDir()
 	if err := os.MkdirAll(qDir, 0700); err != nil {
 		return ActionResult{
@@ -341,8 +358,10 @@ func (i *Intent) executeQuarantine() ActionResult {
 		}
 	}
 
-	dst := filepath.Join(qDir, filepath.Base(src))
-	if err := os.Rename(src, dst); err != nil {
+	// Prefix the vault filename with the intent ID so two files with the same
+	// base name never collide in the quarantine directory.
+	dst := filepath.Join(qDir, i.ID+"-"+filepath.Base(absPath))
+	if err := os.Rename(absPath, dst); err != nil {
 		return ActionResult{
 			IntentID: i.ID, Success: false,
 			Error: "move to quarantine failed: " + err.Error(),
@@ -352,17 +371,70 @@ func (i *Intent) executeQuarantine() ActionResult {
 	// Strip all permissions so the file cannot be re-executed.
 	// Windows: SetNamedSecurityInfoW via go-acl (quarantine_windows.go) — no icacls.exe.
 	// macOS:   os.Chmod(path, 0) via stdlib (quarantine_darwin.go) — no chmod child process.
-	if err := lockFilePermissions(dst); err != nil {
-		return ActionResult{
-			IntentID: i.ID,
-			Success:  true,
-			Output:   fmt.Sprintf("quarantined: %s (permission lock failed: %v)", dst, err),
-		}
+	lockErr := lockFilePermissions(dst)
+
+	// Record in the local vault index regardless of the permission-lock outcome.
+	// A restore is still possible even if the lock partially failed.
+	record, idxErr := recordQuarantine(i.ID, absPath, dst, sha256Hex)
+	if idxErr != nil {
+		logger.Warn().Str("intent", i.ID).Err(idxErr).Msg("vault index write failed")
+	}
+
+	output := fmt.Sprintf("quarantined: %s", dst)
+	if lockErr != nil {
+		output += fmt.Sprintf(" (permission lock failed: %v)", lockErr)
 	}
 	return ActionResult{
-		IntentID: i.ID,
-		Success:  true,
-		Output:   fmt.Sprintf("quarantined: %s", dst),
+		IntentID:     i.ID,
+		Success:      true,
+		Output:       output,
+		QuarantineID: record.ID,
+		OriginalPath: record.OriginalPath,
+		SHA256:       sha256Hex,
+	}
+}
+
+// executeRestore moves a quarantined file back to its original location and
+// removes the vault index entry.
+func (i *Intent) executeRestore() ActionResult {
+	quarantineID, err := argStr(i.Args, "quarantine_id")
+	if err != nil {
+		return ActionResult{IntentID: i.ID, Success: false, Error: err.Error()}
+	}
+
+	record, err := findInVault(quarantineID)
+	if err != nil {
+		return ActionResult{IntentID: i.ID, Success: false, Error: err.Error()}
+	}
+
+	// Recreate the destination directory if it was removed.
+	if err := os.MkdirAll(filepath.Dir(record.OriginalPath), 0755); err != nil {
+		return ActionResult{
+			IntentID: i.ID, Success: false,
+			Error: "cannot recreate destination dir: " + err.Error(),
+		}
+	}
+
+	if err := os.Rename(record.VaultPath, record.OriginalPath); err != nil {
+		return ActionResult{
+			IntentID: i.ID, Success: false,
+			Error: "restore move failed: " + err.Error(),
+		}
+	}
+
+	// Restore standard user-readable permissions (rw-r--r--).
+	// Windows ACL reset is not strictly needed — the file was just moved back.
+	_ = os.Chmod(record.OriginalPath, 0644)
+
+	if err := removeFromVault(quarantineID); err != nil {
+		logger.Warn().Str("quarantine_id", quarantineID).Err(err).Msg("vault index removal failed")
+	}
+
+	return ActionResult{
+		IntentID:     i.ID,
+		Success:      true,
+		Output:       fmt.Sprintf("restored %q → %s", quarantineID, record.OriginalPath),
+		OriginalPath: record.OriginalPath,
 	}
 }
 

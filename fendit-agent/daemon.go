@@ -62,6 +62,15 @@ func startDaemon() {
 		runPendingFlusher(ctx, cfg)
 	}()
 
+	// Direct Socket: instant command dispatch from Guardian via persistent WebSocket.
+	// The HTTP poll path (runActionPoller) remains active as a fallback when the
+	// socket is reconnecting.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runDirectSocket(ctx, cfg)
+	}()
+
 	logger.Info().Str("org", cfg.OrgName).Str("api", cfg.APIBase).Msg("daemon: started")
 	wg.Wait()
 	logger.Info().Msg("daemon: all goroutines stopped — clean shutdown complete")

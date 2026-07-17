@@ -1,0 +1,20 @@
+# Generated secrets — never commit
+.env
+.env.backup
+secrets/
+
+# Host-mounted runtime data
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Node build artifacts
+.next/
+node_modules/
+
+# macOS
+.DS_Store

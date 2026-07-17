@@ -24,6 +24,7 @@ const (
 	pathHealth         = "/health"
 	pathActionsPending = "/api/control/v1/actions/pending"  // polled every 5 s by runActionPoller
 	pathActionsResult  = "/api/control/v1/actions/result"   // execution feedback from ExecutionEngine
+	pathDirectSocket   = "/api/control/ws"                  // persistent WebSocket for instant dispatch
 )
 
 // endpoint builds a fully-qualified URL from the config's stored base URL.
