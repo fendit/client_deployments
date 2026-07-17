@@ -8,7 +8,9 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/hectane/go-acl v1.0.0
 	github.com/kardianos/service v1.2.2
+	github.com/rs/zerolog v1.35.1
 	golang.org/x/sys v0.46.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (
@@ -22,6 +24,4 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
-	github.com/rs/zerolog v1.35.1 // indirect
-	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
