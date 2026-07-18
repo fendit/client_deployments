@@ -14,18 +14,28 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-tags: true
+          fetch-depth: 0
 
-      # 1. Genereer automatisch een nieuwe tag (bijv. v1.0.9 -> v1.0.10)
+      # Bump patch version inline — replaces mathieudutour/github-tag-action
+      # (that action is still on Node 20 with no Node 24 release available)
       - name: Bump version and push tag
         id: tag_version
-        uses: mathieudutour/github-tag-action@v6.2
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: patch  # Verhoogt standaard het laatste getal
+        run: |
+          LATEST=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          [ -z "$LATEST" ] && LATEST="v0.0.0"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST#v}"
+          NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: fendit-agent/go.mod
           cache-dependency-path: |
@@ -33,20 +43,20 @@ jobs:
             fendit-installer/go.sum
 
       - name: Install mingw-w64
-        run: brew install mingw-w64
+        run: |
+          brew untap aws/tap 2>/dev/null || true
+          brew install mingw-w64
 
       - name: Build all targets
         env:
-          # Geef de automatisch gegenereerde versie door aan je bash script
           VERSION: ${{ steps.tag_version.outputs.new_tag }}
         run: |
           chmod +x build_all.sh
           ./build_all.sh
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          # Koppel de release aan de zojuist gemaakte tag
           tag_name: ${{ steps.tag_version.outputs.new_tag }}
           name: Release ${{ steps.tag_version.outputs.new_tag }}
           generate_release_notes: true
