@@ -48,6 +48,9 @@ var allowedActions = map[string]bool{
 	"unisolate":       true,
 	"quarantine":      true,
 	"restore":         true,
+	"wazuh_update":    true,
+	"self_update":     true,
+	"both_update":     true,
 }
 
 // Execute dispatches the intent using OS-native commands.
@@ -91,6 +94,12 @@ func (i *Intent) Execute() ActionResult {
 		return i.executeQuarantine()
 	case "restore":
 		return i.executeRestore()
+	case "wazuh_update":
+		return i.executeQueueUpdate([]string{"wazuh"})
+	case "self_update":
+		return i.executeQueueUpdate([]string{"fendit_agent"})
+	case "both_update":
+		return i.executeQueueUpdate([]string{"wazuh", "fendit_agent"})
 	default:
 		return ActionResult{
 			IntentID: i.ID,
@@ -436,6 +445,36 @@ func (i *Intent) executeRestore() ActionResult {
 		Output:       fmt.Sprintf("restored %q → %s", quarantineID, record.OriginalPath),
 		OriginalPath: record.OriginalPath,
 	}
+}
+
+// executeQueueUpdate writes an UpdateState for the requested components so the
+// daemon's update scheduler goroutine picks it up on its next 5-minute tick.
+// Returns immediately — the actual download and install happen asynchronously.
+func (i *Intent) executeQueueUpdate(components []string) ActionResult {
+	state := &UpdateState{
+		Pending:     true,
+		Components:  components,
+		AgentURL:    stringFromArgs(i.Args, "agent_url"),
+		AgentSHA256:      stringFromArgs(i.Args, "agent_sha256"),
+		WazuhURL:         stringFromArgs(i.Args, "wazuh_url"),
+		WazuhChecksumURL: stringFromArgs(i.Args, "wazuh_checksum_url"),
+		Status:      "pending",
+	}
+	if err := writeUpdateState(state); err != nil {
+		return ActionResult{IntentID: i.ID, Success: false, Error: "write update state: " + err.Error()}
+	}
+	logger.Info().Strs("components", components).Msg("executor: update queued via action intent")
+	return ActionResult{IntentID: i.ID, Success: true, Output: "update queued"}
+}
+
+// stringFromArgs safely reads a string value from the intent args map.
+// Returns "" when the key is absent or the value is nil.
+func stringFromArgs(args map[string]interface{}, key string) string {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 func quarantineDir() string {

@@ -27,11 +27,28 @@ const (
 type heartbeatPayload struct {
 	AgentID             string `json:"agent_id"`
 	Version             string `json:"version"`
+	WazuhVersion        string `json:"wazuh_version,omitempty"`
 	OS                  string `json:"os"`
+	Arch                string `json:"arch"`
 	Status              string `json:"status"`
 	FilterEngineRunning bool   `json:"filter_engine_running"`
 	UptimeSeconds       int64  `json:"uptime_seconds"`
 	LastScanStatus      string `json:"last_scan_status,omitempty"`
+	RulesUpdatedAt      string `json:"rules_updated_at,omitempty"` // ISO8601 mtime of mcp_rules.yarc
+}
+
+// heartbeatResponse is the parsed body of a successful heartbeat POST.
+// Guardian returns an update signal when the agent or Wazuh is out of date.
+type heartbeatResponse struct {
+	Status             string   `json:"status"`
+	UpdateAvailable    bool     `json:"update_available"`
+	Components         []string `json:"components"`
+	AgentVersionLatest string   `json:"agent_version_latest"`
+	WazuhVersionLatest string   `json:"wazuh_version_latest"`
+	AgentURL           string   `json:"agent_url"`
+	AgentSHA256        string   `json:"agent_sha256"`
+	WazuhURL           string   `json:"wazuh_url"`
+	WazuhChecksumURL   string   `json:"wazuh_checksum_url"`
 }
 
 // crashPayload is the body of POST /api/v1/telemetry/crash.
@@ -103,10 +120,19 @@ func sendHeartbeat(cfg *Config, agentID string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+
 	if resp.StatusCode >= 500 {
 		return fmt.Errorf("server error %d", resp.StatusCode)
 	}
+
+	// Parse the update signal embedded in the heartbeat response.
+	// Any parse error is swallowed — a missed update notification is not fatal.
+	var hbResp heartbeatResponse
+	if jsonErr := json.NewDecoder(resp.Body).Decode(&hbResp); jsonErr == nil && hbResp.UpdateAvailable {
+		applyUpdateSignal(&hbResp)
+	}
+
 	return nil
 }
 
@@ -122,11 +148,39 @@ func buildHeartbeatPayload(agentID string) heartbeatPayload {
 	return heartbeatPayload{
 		AgentID:             agentID,
 		Version:             version,
+		WazuhVersion:        wazuhVersion(),
 		OS:                  runtime.GOOS,
+		Arch:                runtime.GOARCH,
 		Status:              "active",
 		FilterEngineRunning: isFilterEngineRunning(),
 		UptimeSeconds:       int64(time.Since(agentStartTime).Seconds()),
 		LastScanStatus:      lastScanStatus(),
+		RulesUpdatedAt:      yaraRulesUpdatedAt(),
+	}
+}
+
+// applyUpdateSignal writes an update_state.json when Guardian signals that
+// one or more components are out of date. Skips if an update is already in
+// progress (status not empty and not "failed").
+func applyUpdateSignal(resp *heartbeatResponse) {
+	existing, _ := readUpdateState()
+	if existing != nil && existing.Pending &&
+		existing.Status != "" && existing.Status != "failed" {
+		return
+	}
+	state := &UpdateState{
+		Pending:     true,
+		Components:  resp.Components,
+		AgentURL:    resp.AgentURL,
+		AgentSHA256:      resp.AgentSHA256,
+		WazuhURL:         resp.WazuhURL,
+		WazuhChecksumURL: resp.WazuhChecksumURL,
+		Status:      "pending",
+	}
+	if err := writeUpdateState(state); err != nil {
+		logger.Warn().Err(err).Msg("heartbeat: failed to write update state")
+	} else {
+		logger.Info().Strs("components", resp.Components).Msg("heartbeat: update available — state written")
 	}
 }
 

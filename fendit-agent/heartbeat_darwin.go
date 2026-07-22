@@ -29,3 +29,30 @@ func lastScanStatus() string {
 	}
 	return strings.TrimSpace(string(b))
 }
+
+// yaraRulesUpdatedAt returns the mtime of mcp_rules.yarc as RFC3339, or "".
+// Wazuh's remoted daemon writes this file whenever Guardian pushes updated rules,
+// so its mtime is a reliable proxy for "when were detection rules last refreshed".
+func yaraRulesUpdatedAt() string {
+	const path = "/Library/Ossec/etc/shared/default/mcp_rules.yarc"
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+}
+
+// wazuhVersion reads the installed Wazuh version on macOS.
+// Parses the VERSION file that Wazuh installs under /Library/Ossec.
+func wazuhVersion() string {
+	// Primary: Wazuh ships a VERSION file with just the version string.
+	if b, err := os.ReadFile("/Library/Ossec/etc/version.txt"); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	// Fallback: ask wazuh-control — slower but reliable.
+	out, err := exec.Command("/Library/Ossec/bin/wazuh-control", "info", "-v").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}

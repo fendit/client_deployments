@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -41,4 +42,37 @@ func lastScanStatus() string {
 		return "unknown"
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// yaraRulesUpdatedAt returns the mtime of mcp_rules.yarc as RFC3339, or "".
+// Wazuh's remoted daemon writes this file whenever Guardian pushes updated rules,
+// so its mtime is a reliable proxy for "when were detection rules last refreshed".
+func yaraRulesUpdatedAt() string {
+	const path = `C:\Program Files (x86)\ossec-agent\shared\default\mcp_rules.yarc`
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+}
+
+// wazuhVersion reads the installed Wazuh version from the Windows registry.
+// Uses the native registry API — no shell process spawned.
+func wazuhVersion() string {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\WOW6432Node\ossec`, registry.QUERY_VALUE)
+	if err != nil {
+		// Try the non-WOW6432 path for 64-bit installs.
+		k, err = registry.OpenKey(registry.LOCAL_MACHINE,
+			`SOFTWARE\ossec`, registry.QUERY_VALUE)
+		if err != nil {
+			return ""
+		}
+	}
+	defer k.Close()
+	v, _, err := k.GetStringValue("Version")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(v)
 }

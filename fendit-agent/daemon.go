@@ -2,9 +2,58 @@ package main
 
 import (
 	"context"
+	"os/exec"
+	"runtime"
 	"sync"
 	"time"
 )
+
+// runUpdateScheduler ticks every 5 minutes and applies any pending update whose
+// ScheduledAt time has elapsed (or is empty, meaning apply as soon as possible).
+func runUpdateScheduler(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			checkAndApplyUpdate()
+		}
+	}
+}
+
+func checkAndApplyUpdate() {
+	// On macOS the daemon runs as root; handle force-restart requests written by
+	// the tray (user session, no shutdown privilege) to restart_state.json.
+	if runtime.GOOS == "darwin" {
+		if rs, _ := readRestartState(); rs != nil && rs.ForceRequested {
+			clearRestartState()
+			logger.Info().Msg("daemon: executing force restart requested by tray")
+			exec.Command("shutdown", "-r", "+1", //nolint:errcheck
+				"Fendit Security: completing a pending security update").Run()
+			return
+		}
+	}
+
+	state, err := readUpdateState()
+	if err != nil || state == nil || !state.Pending {
+		return
+	}
+	// Only act on "pending" — skip if already downloading, installing, done, or failed.
+	if state.Status != "pending" {
+		return
+	}
+	// Honour the scheduled time when set.
+	if state.ScheduledAt != "" {
+		t, err := time.Parse(time.RFC3339, state.ScheduledAt)
+		if err != nil || time.Now().Before(t) {
+			return
+		}
+	}
+	logger.Info().Strs("components", state.Components).Msg("scheduler: triggering pending update")
+	applyPendingUpdate(state)
+}
 
 // cancelDaemon is set once by startDaemon and called by OS-specific shutdown
 // handlers (daemon_windows.go Stop, daemon_darwin.go signal handler).
@@ -69,6 +118,14 @@ func startDaemon() {
 	go func() {
 		defer wg.Done()
 		runDirectSocket(ctx, cfg)
+	}()
+
+	// Update scheduler: reads update_state.json every 5 minutes and applies
+	// any pending update whose ScheduledAt time has passed (or is empty = ASAP).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runUpdateScheduler(ctx)
 	}()
 
 	logger.Info().Str("org", cfg.OrgName).Str("api", cfg.APIBase).Msg("daemon: started")

@@ -18,10 +18,13 @@ const (
 	launchdDir  = "/Library/LaunchDaemons"
 	launchAgDir = "/Library/LaunchAgents"
 	agentBin    = "/usr/local/bin/fendit-agent"
+	yaraExec    = "/Library/Fendit/yara"
 
 	wazuhAuthBin    = "/Library/Ossec/bin/agent-auth"
 	wazuhControlBin = "/Library/Ossec/bin/wazuh-control"
 )
+
+func yaraExecPath() string { return yaraExec }
 
 // install runs the full macOS onboarding sequence.
 // act is the response from POST /api/v1/agent/activate — all credentials are
@@ -32,20 +35,34 @@ func install(act *ActivateResponse) error {
 		apiBase = defaultAPIBase
 	}
 
+	rollback := func(err error) error {
+		rollbackInstall(apiBase, act.SessionID)
+		return err
+	}
+
 	// 1. Download Wazuh package.
 	wazuhPkg := "/tmp/fendit_agent.pkg"
 	fmt.Printf("[*] Downloading Fendit Agent from %s...\n", act.AgentURL)
 	if err := downloadFile(wazuhPkg, act.AgentURL); err != nil {
-		return fmt.Errorf("download wazuh: %w", err)
+		return rollback(fmt.Errorf("download wazuh: %w", err))
 	}
 	defer os.Remove(wazuhPkg)
+
+	// 1a. Verify download integrity against Wazuh's published SHA512 checksum.
+	if act.AgentChecksumURL != "" {
+		fmt.Println("[*] Verifying package integrity (SHA512)...")
+		if err := verifySHA512(wazuhPkg, act.AgentChecksumURL); err != nil {
+			return rollback(fmt.Errorf("integrity check failed: %w", err))
+		}
+		fmt.Println("[*] Integrity check passed.")
+	}
 
 	// 2. Silent PKG install — credentials are never passed as env/CLI args.
 	//    agent-auth handles secure Wazuh manager registration below.
 	fmt.Println("[*] Running silent installer...")
 	if out, err := exec.Command("/usr/sbin/installer", "-pkg", wazuhPkg, "-target", "/").
 		CombinedOutput(); err != nil {
-		return fmt.Errorf("wazuh install: %w\n%s", err, out)
+		return rollback(fmt.Errorf("wazuh install: %w\n%s", err, out))
 	}
 
 	// 2a. Register the agent with the Wazuh manager via agent-auth.
@@ -60,6 +77,18 @@ func install(act *ActivateResponse) error {
 			fmt.Printf("[!] agent-auth failed (non-fatal): %v\n%s\n", err, out)
 		} else {
 			fmt.Println("[*] Wazuh agent registered.")
+		}
+	}
+
+	// 2b. Download YARA scanning engine if the activation response includes a URL.
+	//     Non-fatal: missing YARA disables local scanning but does not block onboarding.
+	if act.YaraURL != "" {
+		fmt.Println("[*] Downloading YARA scanning engine...")
+		if err := downloadFile(yaraExec, act.YaraURL); err != nil {
+			fmt.Printf("[!] YARA download failed (non-fatal): %v\n", err)
+		} else {
+			os.Chmod(yaraExec, 0755) //nolint:errcheck
+			fmt.Println("[*] YARA engine installed.")
 		}
 	}
 
@@ -93,11 +122,14 @@ func install(act *ActivateResponse) error {
 
 	// 6. Install the agent LaunchDaemon and tray LaunchAgent.
 	if err := installLaunchDaemons(); err != nil {
-		return fmt.Errorf("install launch daemons: %w", err)
+		return rollback(fmt.Errorf("install launch daemons: %w", err))
 	}
 
 	// 7. Start Wazuh (telemetry ingest only — no active-response scripts deployed).
 	exec.Command(wazuhControlBin, "start").Run() //nolint:errcheck
+
+	// 8. Mark endpoint active in the portal immediately (don't wait for first heartbeat).
+	confirmInstall(apiBase, act.SessionID)
 
 	fmt.Println("[SUCCESS] macOS installation complete.")
 	openBrowser(portalURL)

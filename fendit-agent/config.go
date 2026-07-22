@@ -19,6 +19,8 @@ const defaultAPIBase = "https://api.fendit.eu"
 // Centralized API path definitions — update here when routing changes.
 const (
 	pathActivate       = "/api/v1/agent/activate"           // activation-code handshake (universal installer)
+	pathConfirm        = "/api/v1/agent/confirm"            // marks endpoint "active" after successful install
+	pathRollback       = "/api/v1/agent/rollback"           // resets activation code if install fails
 	pathReflex         = "/api/control/v1/reflex"
 	pathScanHash       = "/api/control/v1/scan-hash"
 	pathHealth         = "/health"

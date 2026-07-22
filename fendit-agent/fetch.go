@@ -29,11 +29,15 @@ var agentHTTPClient = &http.Client{
 // Fields map 1:1 to what the Go agent needs for Wazuh install + config persistence.
 type ActivateResponse struct {
 	AgentToken       string `json:"agent_token"`
+	SessionID        string `json:"session_id"`    // two-phase install commit; used for rollback
 	OrganizationName string `json:"organization_name"`
 	WazuhManager     string `json:"agent_wazuh_manager"`
 	InstallGroup     string `json:"install_group"`
 	AgentURL         string `json:"agent_url"`
 	APIBase          string `json:"api_base_url"`
+	AgentChecksumURL string `json:"agent_checksum_url,omitempty"` // Wazuh CDN .sha512 URL for install-time verification
+	YaraURL          string `json:"yara_url,omitempty"`
+	YaraSHA256       string `json:"yara_sha256,omitempty"`
 }
 
 // activateAgent sends the 6-character code to Guardian and, on success, returns
@@ -76,6 +80,44 @@ func activateAgent(code, hostname string) (*ActivateResponse, error) {
 		return nil, fmt.Errorf("server returned empty agent token")
 	}
 	return &act, nil
+}
+
+// confirmInstall calls Guardian to flip the provisional endpoint from "installing" to "active".
+// Non-fatal — the first heartbeat will correct status within 5 minutes if this fails.
+func confirmInstall(apiBase, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]string{"session_id": sessionID})
+	req, err := http.NewRequest("POST", apiBase+pathConfirm, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Fendit-Agent/2.0")
+	resp, err := agentHTTPClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+// rollbackInstall calls Guardian to reset the activation code and remove the ghost
+// endpoint record when installation fails after the code has been burned.
+func rollbackInstall(apiBase, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]string{"session_id": sessionID})
+	req, err := http.NewRequest("POST", apiBase+pathRollback, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Fendit-Agent/2.0")
+	resp, err := agentHTTPClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
 }
 
 // fetchPendingActions retrieves 'approved' action intents for this agent from Guardian.

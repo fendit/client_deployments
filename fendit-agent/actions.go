@@ -293,7 +293,7 @@ func handleYaraCheck(ctx context.Context, cfg *Config, filePath string) {
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "yara", args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, yaraExecPath(), args...).CombinedOutput()
 
 	result := strings.TrimSpace(string(out))
 

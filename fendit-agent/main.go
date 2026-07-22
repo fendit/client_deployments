@@ -12,14 +12,21 @@ func main() {
 	initLogger()
 	defer handlePanic()
 
-	trayMode      := flag.Bool("tray",      false, "Run in system tray mode")
-	reflexTrigger := flag.String("reflex",   "",    "Fire a local reflex (honeypot)")
-	dnsGuard      := flag.Bool("dns-guard", false, "Re-apply DNS sinkhole settings")
-	codeFlag      := flag.String("code",    "",    "Activation code for silent/RMM deployments (skips GUI dialog)")
-	silentFlag    := flag.Bool("silent",    false, "Suppress non-critical console output (useful for RMM deployments)")
+	trayMode      := flag.Bool("tray",        false, "Run in system tray mode")
+	reflexTrigger := flag.String("reflex",    "",    "Fire a local reflex (honeypot)")
+	dnsGuard      := flag.Bool("dns-guard",  false, "Re-apply DNS sinkhole settings")
+	codeFlag      := flag.String("code",     "",    "Activation code for silent/RMM deployments (skips GUI dialog)")
+	silentFlag    := flag.Bool("silent",     false, "Suppress non-critical console output (useful for RMM deployments)")
+	updateSwap    := flag.Bool("update-swap", false, "Internal: atomic binary swap after self-update download")
+	targetFlag    := flag.String("target",   "",    "Target binary path for --update-swap")
 	flag.Parse()
 
 	switch {
+	case *updateSwap:
+		// Spawned by selfUpdate() on the new .pending binary. Waits for the old
+		// service/daemon to stop, copies itself to targetFlag, then restarts the service.
+		runUpdateSwap(*targetFlag)
+
 	case *trayMode:
 		runTray()
 

@@ -19,10 +19,13 @@ import (
 const (
 	fenditDir   = `C:\ProgramData\Fendit`
 	agentBinDst = `C:\Program Files\Fendit\fendit-agent.exe`
+	yaraExec    = `C:\Program Files\Fendit\yara.exe`
 
 	wazuhAuthBin = `C:\Program Files (x86)\ossec-agent\agent-auth.exe`
 	wazuhSvcName = "Wazuh"
 )
+
+func yaraExecPath() string { return yaraExec }
 
 // install runs the full Windows onboarding sequence.
 // act is the response from POST /api/v1/agent/activate — all credentials are
@@ -35,13 +38,29 @@ func install(act *ActivateResponse) error {
 		apiBase = defaultAPIBase
 	}
 
+	// rollback resets the activation code and removes the ghost endpoint record
+	// when installation fails after the code has been burned.
+	rollback := func(err error) error {
+		rollbackInstall(apiBase, act.SessionID)
+		return err
+	}
+
 	// 1. Download Wazuh MSI.
 	msiPath := filepath.Join(os.TempDir(), "fendit_agent.msi")
 	fmt.Printf("[*] Downloaden Fendit Agent van %s...\n", act.AgentURL)
 	if err := downloadFileWin(msiPath, act.AgentURL); err != nil {
-		return fmt.Errorf("download wazuh: %w", err)
+		return rollback(fmt.Errorf("download wazuh: %w", err))
 	}
 	defer os.Remove(msiPath)
+
+	// 1a. Verify download integrity against Wazuh's published SHA512 checksum.
+	if act.AgentChecksumURL != "" {
+		fmt.Println("[*] Verificeren pakket integriteit (SHA512)...")
+		if err := verifySHA512(msiPath, act.AgentChecksumURL); err != nil {
+			return rollback(fmt.Errorf("integriteitscontrole mislukt: %w", err))
+		}
+		fmt.Println("[*] Integriteitscontrole geslaagd.")
+	}
 
 	// 2. Silent base install — credentials are passed via agent-auth so they
 	//    never appear in the Event Log or process argument lists.
@@ -49,7 +68,7 @@ func install(act *ActivateResponse) error {
 	msiCmd := exec.Command("msiexec.exe", "/i", msiPath, "/qn", "/norestart")
 	msiCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if out, err := msiCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("wazuh install: %w\n%s", err, out)
+		return rollback(fmt.Errorf("wazuh install: %w\n%s", err, out))
 	}
 
 	// 2a. Register with the Wazuh manager via agent-auth.exe.
@@ -66,6 +85,24 @@ func install(act *ActivateResponse) error {
 			fmt.Printf("[!] agent-auth mislukt (niet-fataal): %v\n%s\n", err, out)
 		} else {
 			fmt.Println("[*] Wazuh agent succesvol geregistreerd.")
+		}
+	}
+
+	// 2b. Download YARA scanning engine if the activation response includes a URL.
+	//     Non-fatal: missing YARA disables local scanning but does not block onboarding.
+	if act.YaraURL != "" {
+		yaraTemp := filepath.Join(os.TempDir(), "yara.exe")
+		fmt.Println("[*] Downloaden YARA scan engine...")
+		if err := downloadFileWin(yaraTemp, act.YaraURL); err != nil {
+			fmt.Printf("[!] YARA download mislukt (niet-fataal): %v\n", err)
+		} else {
+			os.MkdirAll(filepath.Dir(yaraExec), 0755) //nolint:errcheck
+			if err := copyFile(yaraTemp, yaraExec); err != nil {
+				fmt.Printf("[!] YARA installatie mislukt (niet-fataal): %v\n", err)
+			} else {
+				fmt.Println("[*] YARA scan engine geinstalleerd.")
+			}
+			os.Remove(yaraTemp) //nolint:errcheck
 		}
 	}
 
@@ -93,7 +130,7 @@ func install(act *ActivateResponse) error {
 
 	// 6. Copy binary to stable path, register as a Windows service, add Run key.
 	if err := installSelf(); err != nil {
-		return fmt.Errorf("install self: %w", err)
+		return rollback(fmt.Errorf("install self: %w", err))
 	}
 
 	// 7. Register the fendit:// protocol handler.
@@ -105,6 +142,9 @@ func install(act *ActivateResponse) error {
 	startWazuh := exec.Command("sc.exe", "start", wazuhSvcName)
 	startWazuh.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	startWazuh.Run() //nolint:errcheck
+
+	// 9. Mark endpoint active in the portal immediately (don't wait for first heartbeat).
+	confirmInstall(apiBase, act.SessionID)
 
 	fmt.Println("[SUCCESS] Windows Onboarding afgerond.")
 	openBrowser(portalURL)
