@@ -38,6 +38,7 @@ type ActivateResponse struct {
 	AgentChecksumURL string `json:"agent_checksum_url,omitempty"` // Wazuh CDN .sha512 URL for install-time verification
 	YaraURL          string `json:"yara_url,omitempty"`
 	YaraSHA256       string `json:"yara_sha256,omitempty"`
+	YaraExtract      string `json:"yara_extract,omitempty"` // filename to extract when yara_url is a .zip
 }
 
 // activateAgent sends the 6-character code to Guardian and, on success, returns

@@ -3,12 +3,14 @@
 package main
 
 import (
+	"archive/zip"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -88,21 +90,32 @@ func install(act *ActivateResponse) error {
 		}
 	}
 
-	// 2b. Download YARA scanning engine if the activation response includes a URL.
+	// 2b. Download and install YARA scanning engine.
 	//     Non-fatal: missing YARA disables local scanning but does not block onboarding.
+	//     Windows release is a ZIP — extract the named binary from it.
 	if act.YaraURL != "" {
-		yaraTemp := filepath.Join(os.TempDir(), "yara.exe")
 		fmt.Println("[*] Downloaden YARA scan engine...")
-		if err := downloadFileWin(yaraTemp, act.YaraURL); err != nil {
+		yaraTemp, err := downloadAndVerify(act.YaraURL, act.YaraSHA256)
+		if err != nil {
 			fmt.Printf("[!] YARA download mislukt (niet-fataal): %v\n", err)
 		} else {
 			os.MkdirAll(filepath.Dir(yaraExec), 0755) //nolint:errcheck
-			if err := copyFile(yaraTemp, yaraExec); err != nil {
-				fmt.Printf("[!] YARA installatie mislukt (niet-fataal): %v\n", err)
+			var installErr error
+			if strings.HasSuffix(strings.ToLower(act.YaraURL), ".zip") {
+				extract := act.YaraExtract
+				if extract == "" {
+					extract = "yara64.exe"
+				}
+				installErr = extractFromZip(yaraTemp, extract, yaraExec)
+			} else {
+				installErr = copyFile(yaraTemp, yaraExec)
+			}
+			os.Remove(yaraTemp) //nolint:errcheck
+			if installErr != nil {
+				fmt.Printf("[!] YARA installatie mislukt (niet-fataal): %v\n", installErr)
 			} else {
 				fmt.Println("[*] YARA scan engine geinstalleerd.")
 			}
-			os.Remove(yaraTemp) //nolint:errcheck
 		}
 	}
 
@@ -264,4 +277,32 @@ func copyFile(src, dst string) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// extractFromZip extracts a single file by name from a ZIP archive into dst.
+// Matches on the base filename so it works regardless of directory nesting inside the ZIP.
+func extractFromZip(zipPath, filename, dst string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if strings.EqualFold(filepath.Base(f.Name), filename) {
+			rc, err := f.Open()
+			if err != nil {
+				return fmt.Errorf("open zip entry: %w", err)
+			}
+			defer rc.Close()
+			out, err := os.Create(dst)
+			if err != nil {
+				return fmt.Errorf("create dst: %w", err)
+			}
+			defer out.Close()
+			_, err = io.Copy(out, rc)
+			return err
+		}
+	}
+	return fmt.Errorf("%s not found in zip", filename)
 }
