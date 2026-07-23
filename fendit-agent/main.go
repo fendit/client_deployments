@@ -19,9 +19,13 @@ func main() {
 	silentFlag    := flag.Bool("silent",     false, "Suppress non-critical console output (useful for RMM deployments)")
 	updateSwap    := flag.Bool("update-swap", false, "Internal: atomic binary swap after self-update download")
 	targetFlag    := flag.String("target",   "",    "Target binary path for --update-swap")
+	uninstall     := flag.Bool("uninstall",  false, "Remove Fendit from this device (requires elevation)")
 	flag.Parse()
 
 	switch {
+	case *uninstall:
+		runUninstall()
+
 	case *updateSwap:
 		// Spawned by selfUpdate() on the new .pending binary. Waits for the old
 		// service/daemon to stop, copies itself to targetFlag, then restarts the service.

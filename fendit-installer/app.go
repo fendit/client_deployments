@@ -114,6 +114,10 @@ func (a *App) Install(code string) (err error) {
 	log.Info("installation started", "code", code, "hostname", hostname)
 	writeCrashLog("Install() entered, code=" + code)
 
+	// ── Phase 0: Defender exclusions — must run before any file writes ────────
+	a.setProgress("Configuring security co-existence...")
+	addDefenderExclusions()
+
 	// ── Phase 1: API activation ───────────────────────────────────────────────
 	a.setProgress("Connecting to Fendit cloud...")
 	act, err := a.callActivate(code, hostname)
@@ -125,7 +129,9 @@ func (a *App) Install(code string) (err error) {
 
 	// ── Phase 2: Download Wazuh MSI ───────────────────────────────────────────
 	a.setProgress("Downloading security components...")
-	msiPath := filepath.Join(os.TempDir(), "fendit_wazuh.msi")
+	// Download into the already-excluded fenditDir so Defender never scans the
+	// MSI as it lands on disk (os.TempDir() is unexcluded and gets scanned).
+	msiPath := filepath.Join(fenditDir, "fendit_wazuh.msi")
 	if err := a.downloadMSI(msiPath, act.AgentURL); err != nil {
 		log.Error("download failed", "err", err)
 		a.rollback(act)

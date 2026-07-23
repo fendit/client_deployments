@@ -47,8 +47,13 @@ func install(act *ActivateResponse) error {
 		return err
 	}
 
-	// 1. Download Wazuh MSI.
-	msiPath := filepath.Join(os.TempDir(), "fendit_agent.msi")
+	// 0. Configure Defender exclusions before anything touches disk.
+	addDefenderExclusions()
+
+	// 1. Download Wazuh MSI into the already-excluded fenditDir so Defender
+	//    never scans it as it lands (os.TempDir() is unexcluded and gets scanned).
+	os.MkdirAll(fenditDir, 0700) //nolint:errcheck
+	msiPath := filepath.Join(fenditDir, "fendit_agent.msi")
 	fmt.Printf("[*] Downloaden Fendit Agent van %s...\n", act.AgentURL)
 	if err := downloadFileWin(msiPath, act.AgentURL); err != nil {
 		return rollback(fmt.Errorf("download wazuh: %w", err))

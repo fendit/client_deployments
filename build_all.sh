@@ -2,11 +2,12 @@
 # Fendit Build Pipeline
 #
 # Outputs:
-#   release/windows/fendit_base.exe  — Fyne GUI installer (Windows amd64)
+#   release/windows/fendit_base.exe  — WebView2 GUI installer (Windows amd64)
 #   release/osx/fendit_base.pkg      — Fyne GUI installer (macOS universal, pkg-wrapped)
 #
 # Prerequisites (macOS arm64 runner):
 #   go, pkgbuild, lipo, sips, iconutil, x86_64-w64-mingw32-gcc
+#   goversioninfo  — go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
 
 set -euo pipefail
 
@@ -24,12 +25,21 @@ VERSION="${VERSION#v}"
 echo "Fendit Build Pipeline — v${VERSION}"
 
 # ── Sanity checks ─────────────────────────────────────────────────────────────
-for cmd in go pkgbuild lipo sips iconutil x86_64-w64-mingw32-gcc; do
+for cmd in go pkgbuild lipo sips iconutil x86_64-w64-mingw32-gcc goversioninfo; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "ERROR: '$cmd' not found. Install missing tools before running this script."
+    echo "       For goversioninfo: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest"
     exit 1
   fi
 done
+
+# ── Step -1: Generate Windows PE version resources ────────────────────────────
+# goversioninfo reads versioninfo.json and emits resource.syso which go build
+# automatically links into the Windows PE binary (provides CompanyName,
+# ProductName, FileVersion etc. — Defender uses these as a trust signal).
+echo "[-1/6] Generating Windows PE version resources..."
+( cd "$AGENT_SRC"    && GOOS=windows GOARCH=amd64 goversioninfo -icon=icon.ico -o resource_windows_amd64.syso )
+( cd "$INSTALLER_SRC" && GOOS=windows GOARCH=amd64 goversioninfo -o resource_windows_amd64.syso )
 
 # ── Clean slate ───────────────────────────────────────────────────────────────
 rm -rf "$OUT_DIR" "$TMP_DIR" tmp_pkg_build  # tmp_pkg_build = legacy name
