@@ -8,36 +8,24 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// isAdmin reports whether the current process token belongs to the local
-// Administrators group. Uses the native Windows token API — no child process.
+// isAdmin reports whether the current process is running with elevated
+// (administrator) privileges. Uses TokenElevation — the correct UAC-aware
+// check. The older IsMember(adminSID) approach fails on UAC filtered tokens:
+// the Administrators SID is present but disabled, so IsMember returns false
+// even though the process was elevated. IsElevated queries the kernel directly.
 func isAdmin() bool {
-	var sid *windows.SID
-	err := windows.AllocateAndInitializeSid(
-		&windows.SECURITY_NT_AUTHORITY, 2,
-		windows.SECURITY_BUILTIN_DOMAIN_RID,
-		windows.DOMAIN_ALIAS_RID_ADMINS,
-		0, 0, 0, 0, 0, 0,
-		&sid,
-	)
-	if err != nil {
-		return false
-	}
-	defer windows.FreeSid(sid)
-
 	token, err := windows.OpenCurrentProcessToken()
 	if err != nil {
 		return false
 	}
 	defer token.Close()
-
-	ok, err := token.IsMember(sid)
-	return err == nil && ok
+	return token.IsElevated()
 }
 
 // relaunchAsAdmin re-launches the current binary with UAC elevation using
-// ShellExecuteW with the "runas" verb. This triggers the native Windows UAC
-// consent dialog without spawning an intermediate powershell.exe process.
-// On success the original (unelevated) process exits immediately.
+// ShellExecuteW with the "runas" verb. Passes --elevated so the child process
+// knows it is the elevated instance and must not loop if isAdmin still fails
+// (e.g. policy restriction). On success the original process exits immediately.
 func relaunchAsAdmin() {
 	exe, err := os.Executable()
 	if err != nil {
@@ -52,14 +40,15 @@ func relaunchAsAdmin() {
 	if err != nil {
 		return
 	}
-
-	// ShellExecuteW with "runas" is the documented Win32 mechanism for requesting
-	// elevation. It does not spawn any intermediate process.
-	err = windows.ShellExecute(0, verbPtr, exePtr, nil, nil, windows.SW_SHOWNORMAL)
+	// Pass --elevated so the child process knows not to re-elevate if isAdmin
+	// somehow still returns false (GP restriction, broken token API, etc.).
+	argsPtr, err := windows.UTF16PtrFromString("--elevated")
 	if err != nil {
-		// UAC was denied or an error occurred — surface nothing, just return.
-		// The caller (startup) will continue unelevated; operations requiring
-		// elevation will fail with descriptive errors later.
+		return
+	}
+
+	err = windows.ShellExecute(0, verbPtr, exePtr, argsPtr, nil, windows.SW_SHOWNORMAL)
+	if err != nil {
 		return
 	}
 

@@ -2,14 +2,21 @@
 
 package main
 
+import "os"
+
 func main() {
-	// Network telemetry + local crash log are written by handleInstallerPanic.
-	// On macOS the OS also writes its own crash report to
-	// ~/Library/Logs/DiagnosticReports/ — check there for DLL-equivalent panics.
+	// Network telemetry + macOS DiagnosticReports handle crash logging.
 	defer handleInstallerPanic()
 
-	// Elevation must happen before the Fyne window opens.
 	if !isAdmin() {
+		// --elevated means we are already the osascript-spawned root child
+		// and isAdmin still returned false (sandbox / policy restriction).
+		// Exit instead of looping — the user will see the process disappear.
+		for _, arg := range os.Args[1:] {
+			if arg == "--elevated" {
+				os.Exit(1)
+			}
+		}
 		relaunchAsAdmin()
 		return
 	}
