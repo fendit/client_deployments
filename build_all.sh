@@ -25,13 +25,18 @@ VERSION="${VERSION#v}"
 echo "Fendit Build Pipeline — v${VERSION}"
 
 # ── Sanity checks ─────────────────────────────────────────────────────────────
-for cmd in go pkgbuild lipo sips iconutil x86_64-w64-mingw32-gcc goversioninfo; do
+for cmd in go pkgbuild lipo sips iconutil x86_64-w64-mingw32-gcc; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "ERROR: '$cmd' not found. Install missing tools before running this script."
-    echo "       For goversioninfo: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest"
     exit 1
   fi
 done
+
+# goversioninfo is a Go tool — install it automatically if missing.
+if ! command -v goversioninfo &>/dev/null; then
+  echo "[*] Installing goversioninfo..."
+  go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+fi
 
 # ── Step -1: Generate Windows PE version resources ────────────────────────────
 # goversioninfo reads versioninfo.json and emits resource.syso which go build
