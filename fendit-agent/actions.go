@@ -44,6 +44,11 @@ func triggerHoneypotReflex(cfg *Config) {
 
 	smartIsolate()
 
+	// Bridge event to Wazuh via the local events.log (no hostname — Wazuh
+	// already knows the agent identity from its own enrollment).
+	appendEventToLog(fmt.Sprintf(`{"trigger":"honeypot","ts":%q}`, ts))
+	appendEventToLog(fmt.Sprintf(`{"trigger":"isolate","reason":"honeypot","ts":%q}`, ts))
+
 	if cfg == nil {
 		return
 	}
@@ -280,16 +285,14 @@ func handleYaraCheck(ctx context.Context, cfg *Config, filePath string) {
 	// Give the file writer a moment to finish flushing before we scan.
 	time.Sleep(750 * time.Millisecond)
 
-	rulesPath, compiled := yaraRulesPath()
+	rulesPath := yaraRulesPath()
 	if rulesPath == "" {
 		log.Printf("yara watcher: no rules file found — skipping %s", filePath)
 		return
 	}
 
-	args := []string{rulesPath, filePath}
-	if compiled {
-		args = []string{"-C", rulesPath, filePath}
-	}
+	// yr scan <rules> <target> — auto-detects compiled (.yarc) vs source (.yar) format.
+	args := []string{"scan", rulesPath, filePath}
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -297,7 +300,7 @@ func handleYaraCheck(ctx context.Context, cfg *Config, filePath string) {
 
 	result := strings.TrimSpace(string(out))
 
-	// yara exits 0 with output on match, 0 with no output on clean.
+	// yr exits 0 with output on match, 0 with no output on clean.
 	// Non-zero exit can mean an error (file unreadable, bad rules, etc.) — don't act.
 	if err != nil || result == "" {
 		return
@@ -314,21 +317,32 @@ func handleYaraCheck(ctx context.Context, cfg *Config, filePath string) {
 		log.Printf("yara watcher: quarantined %s → %s", filePath, quarantineDir())
 	}
 
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	// Bridge each matched rule to Wazuh as an individual JSON event so that
+	// local_rules.xml rule 110001/110002 can fire per-rule rather than once
+	// for the full match block. No hostname — Wazuh supplies agent identity.
+	for _, ruleName := range parseYrMatches(result) {
+		appendEventToLog(fmt.Sprintf(
+			`{"trigger":"yara_reflex","yara_rule":%q,"yara_file":%q,"ts":%q}`,
+			ruleName, filePath, ts,
+		))
+	}
+
 	if cfg == nil {
 		return
 	}
 
 	host, _ := os.Hostname()
-	ts := time.Now().UTC().Format(time.RFC3339)
 	postReflexTelemetry(cfg, fmt.Sprintf(
 		`{"trigger":"yara_reflex","host":%q,"ts":%q,"file":%q,"match":%q}`,
 		host, ts, filePath, result,
 	))
 }
 
-// yaraRulesPath returns the path to the YARA rules file (preferring compiled .yarc)
-// and whether it is a compiled rules file (requiring yara -C flag).
-func yaraRulesPath() (path string, compiled bool) {
+// yaraRulesPath returns the path to the YARA-X rules file (preferring compiled .yarc).
+// yr auto-detects compiled vs source format — no flag needed.
+func yaraRulesPath() string {
 	var base string
 	switch runtime.GOOS {
 	case "windows":
@@ -337,12 +351,32 @@ func yaraRulesPath() (path string, compiled bool) {
 		base = "/Library/Ossec/etc/shared/default/mcp_rules"
 	}
 	if _, err := os.Stat(base + ".yarc"); err == nil {
-		return base + ".yarc", true
+		return base + ".yarc"
 	}
 	if _, err := os.Stat(base + ".yar"); err == nil {
-		return base + ".yar", false
+		return base + ".yar"
 	}
-	return "", false
+	return ""
+}
+
+// parseYrMatches extracts the rule name from each line of yr scan output.
+// yr prints one line per matching rule: "<RuleName> <filePath>".
+// Lines that don't conform to that format are skipped.
+func parseYrMatches(output string) []string {
+	var rules []string
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Rule name is the first space-delimited token.
+		if idx := strings.IndexByte(line, ' '); idx > 0 {
+			rules = append(rules, line[:idx])
+		} else {
+			rules = append(rules, line)
+		}
+	}
+	return rules
 }
 
 // isExecutableLike returns true for file extensions commonly used by malicious payloads.

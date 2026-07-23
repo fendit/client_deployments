@@ -3,6 +3,8 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,7 +20,7 @@ const (
 	launchdDir  = "/Library/LaunchDaemons"
 	launchAgDir = "/Library/LaunchAgents"
 	agentBin    = "/usr/local/bin/fendit-agent"
-	yaraExec    = "/Library/Fendit/yara"
+	yaraExec    = "/Library/Fendit/yr"
 
 	wazuhAuthBin    = "/Library/Ossec/bin/agent-auth"
 	wazuhControlBin = "/Library/Ossec/bin/wazuh-control"
@@ -80,15 +82,37 @@ func install(act *ActivateResponse) error {
 		}
 	}
 
-	// 2b. Download YARA scanning engine if the activation response includes a URL.
-	//     Non-fatal: missing YARA disables local scanning but does not block onboarding.
+	// 2b. Download YARA-X scanning engine if the activation response includes a URL.
+	//     Non-fatal: missing engine disables local scanning but does not block onboarding.
+	//     macOS releases ship as .tar.gz archives — extract the named binary from the archive.
 	if act.YaraURL != "" {
-		fmt.Println("[*] Downloading YARA scanning engine...")
-		if err := downloadFile(yaraExec, act.YaraURL); err != nil {
-			fmt.Printf("[!] YARA download failed (non-fatal): %v\n", err)
-		} else {
-			os.Chmod(yaraExec, 0755) //nolint:errcheck
-			fmt.Println("[*] YARA engine installed.")
+		fmt.Println("[*] Downloading scanning engine...")
+		tmp, err := os.CreateTemp("", "fendit-yr-*")
+		if err == nil {
+			tmp.Close()
+			if dlErr := downloadFile(tmp.Name(), act.YaraURL); dlErr != nil {
+				fmt.Printf("[!] Scanning engine download failed (non-fatal): %v\n", dlErr)
+				os.Remove(tmp.Name()) //nolint:errcheck
+			} else {
+				os.MkdirAll(filepath.Dir(yaraExec), 0755) //nolint:errcheck
+				var installErr error
+				if strings.HasSuffix(strings.ToLower(act.YaraURL), ".tar.gz") {
+					extract := act.YaraExtract
+					if extract == "" {
+						extract = "yr"
+					}
+					installErr = extractFromTarGz(tmp.Name(), extract, yaraExec)
+				} else {
+					installErr = copyFile(tmp.Name(), yaraExec)
+				}
+				os.Remove(tmp.Name()) //nolint:errcheck
+				if installErr != nil {
+					fmt.Printf("[!] Scanning engine install failed (non-fatal): %v\n", installErr)
+				} else {
+					os.Chmod(yaraExec, 0755) //nolint:errcheck
+					fmt.Println("[*] Scanning engine installed.")
+				}
+			}
 		}
 	}
 
@@ -134,6 +158,55 @@ func install(act *ActivateResponse) error {
 	fmt.Println("[SUCCESS] macOS installation complete.")
 	openBrowser(portalURL)
 	return nil
+}
+
+// extractFromTarGz extracts a single file by name from a .tar.gz archive into dst.
+func extractFromTarGz(tarPath, filename, dst string) error {
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("open tar: %w", err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("tar read: %w", err)
+		}
+		if strings.EqualFold(filepath.Base(hdr.Name), filename) {
+			out, err := os.Create(dst)
+			if err != nil {
+				return fmt.Errorf("create dst: %w", err)
+			}
+			defer out.Close()
+			_, err = io.Copy(out, tr)
+			return err
+		}
+	}
+	return fmt.Errorf("%s not found in tar", filename)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // downloadFile streams url to dst using a long timeout for large packages.

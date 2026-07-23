@@ -41,6 +41,18 @@ func scheduleUpdateDialog() string {
 	}
 }
 
+// notifySecurityAction shows a macOS notification banner when the agent executes
+// a protective action. No technical details — just a plain-language summary.
+func notifySecurityAction(action string) {
+	title, body := securityActionText(action)
+	if title == "" {
+		return
+	}
+	exec.Command("osascript", "-e",
+		`display notification "`+body+`" with title "Fendit Security" subtitle "`+title+`"`,
+	).Start() //nolint:errcheck
+}
+
 // notifyUpdateAvailable shows a macOS notification banner when an update is detected.
 func notifyUpdateAvailable() {
 	exec.Command("osascript", "-e",

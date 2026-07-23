@@ -53,6 +53,16 @@ var allowedActions = map[string]bool{
 	"both_update":     true,
 }
 
+// _notifyActions lists the actions that show an end-user notification popup.
+// Silent background actions (unisolate, restore, update) are excluded.
+var _notifyActions = map[string]bool{
+	"kill_process":    true,
+	"suspend_process": true,
+	"block_ip":        true,
+	"quarantine":      true,
+	"isolate":         true,
+}
+
 // Execute dispatches the intent using OS-native commands.
 // No shell interpreter is ever invoked — every case calls exec.CommandContext
 // with a fixed argument list, eliminating shell injection entirely.
@@ -68,38 +78,39 @@ func (i *Intent) Execute() ActionResult {
 	ctx, cancel := context.WithTimeout(context.Background(), intentExecTimeout)
 	defer cancel()
 
+	var result ActionResult
 	switch i.Action {
 	case "kill_process":
 		cmd, err := buildKillCmd(ctx, i.Args)
-		return i.execCmd(cmd, err)
+		result = i.execCmd(cmd, err)
 	case "suspend_process":
 		cmd, err := buildSuspendCmd(ctx, i.Args)
-		return i.execCmd(cmd, err)
+		result = i.execCmd(cmd, err)
 	case "block_ip":
 		cmd, err := buildBlockIPCmd(ctx, i.Args)
-		return i.execCmd(cmd, err)
+		result = i.execCmd(cmd, err)
 	case "unblock_ip":
 		cmd, err := buildUnblockIPCmd(ctx, i.Args)
-		return i.execCmd(cmd, err)
+		result = i.execCmd(cmd, err)
 	case "isolate":
 		// Firewall-based isolation: blocks all traffic except the Fendit control
 		// plane (TCP 443) and DNS (UDP 53), so the agent can still receive
 		// an unisolate command from the SOC.
 		// NOTE: this is distinct from severNetwork() which is the emergency honeypot
 		// reflex — that one intentionally cuts everything including the control plane.
-		return i.executeIsolate(ctx)
+		result = i.executeIsolate(ctx)
 	case "unisolate":
-		return i.executeUnisolate(ctx)
+		result = i.executeUnisolate(ctx)
 	case "quarantine":
-		return i.executeQuarantine()
+		result = i.executeQuarantine()
 	case "restore":
-		return i.executeRestore()
+		result = i.executeRestore()
 	case "wazuh_update":
-		return i.executeQueueUpdate([]string{"wazuh"})
+		result = i.executeQueueUpdate([]string{"wazuh"})
 	case "self_update":
-		return i.executeQueueUpdate([]string{"fendit_agent"})
+		result = i.executeQueueUpdate([]string{"fendit_agent"})
 	case "both_update":
-		return i.executeQueueUpdate([]string{"wazuh", "fendit_agent"})
+		result = i.executeQueueUpdate([]string{"wazuh", "fendit_agent"})
 	default:
 		return ActionResult{
 			IntentID: i.ID,
@@ -107,6 +118,11 @@ func (i *Intent) Execute() ActionResult {
 			Error:    fmt.Sprintf("unsupported action: %s", i.Action),
 		}
 	}
+
+	if result.Success && _notifyActions[i.Action] {
+		go notifySecurityAction(i.Action)
+	}
+	return result
 }
 
 // execCmd runs a pre-built command and captures combined stdout/stderr.

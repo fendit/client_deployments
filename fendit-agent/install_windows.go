@@ -21,7 +21,7 @@ import (
 const (
 	fenditDir   = `C:\ProgramData\Fendit`
 	agentBinDst = `C:\Program Files\Fendit\fendit-agent.exe`
-	yaraExec    = `C:\Program Files\Fendit\yara.exe`
+	yaraExec    = `C:\Program Files\Fendit\yr.exe`
 
 	wazuhAuthBin = `C:\Program Files (x86)\ossec-agent\agent-auth.exe`
 	wazuhSvcName = "Wazuh"
@@ -104,7 +104,7 @@ func install(act *ActivateResponse) error {
 			if strings.HasSuffix(strings.ToLower(act.YaraURL), ".zip") {
 				extract := act.YaraExtract
 				if extract == "" {
-					extract = "yara64.exe"
+					extract = "yr.exe"
 				}
 				installErr = extractFromZip(yaraTemp, extract, yaraExec)
 			} else {

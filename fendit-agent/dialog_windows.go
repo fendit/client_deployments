@@ -52,6 +52,25 @@ func scheduleUpdateDialog() string {
 	return ""
 }
 
+// notifySecurityAction shows a Windows toast when the agent executes a
+// protective action (kill, block, quarantine, isolate) so the user understands
+// why something changed on their device. No technical details are shown.
+func notifySecurityAction(action string) {
+	title, body := securityActionText(action)
+	if title == "" {
+		return
+	}
+	registerToastAppID()
+	script := fmt.Sprintf(`
+[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
+[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType=WindowsRuntime]
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml('<toast><visual><binding template="ToastGeneric"><text>%s</text><text>%s</text></binding></visual></toast>')
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('eu.fendit.agent').Show([Windows.UI.Notifications.ToastNotification]::new($xml))
+`, title, body)
+	exec.Command("powershell", "-WindowStyle", "Hidden", "-NonInteractive", "-Command", script).Start() //nolint:errcheck
+}
+
 // notifyUpdateAvailable shows a Windows toast notification when a pending update
 // is first detected. Registers the app AUMID so the notification system can
 // attribute the toast correctly.
