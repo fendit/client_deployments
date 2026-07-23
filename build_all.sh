@@ -38,19 +38,47 @@ if ! command -v goversioninfo &>/dev/null; then
   go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
 fi
 
-# ── Step -1: Generate Windows PE version resources ────────────────────────────
-# goversioninfo reads versioninfo.json and emits resource.syso which go build
-# automatically links into the Windows PE binary (provides CompanyName,
-# ProductName, FileVersion etc. — Defender uses these as a trust signal).
-echo "[-1/6] Generating Windows PE version resources..."
-( cd "$AGENT_SRC"    && GOOS=windows GOARCH=amd64 goversioninfo -icon=icon.ico -o resource_windows_amd64.syso )
-( cd "$INSTALLER_SRC" && GOOS=windows GOARCH=amd64 goversioninfo -o resource_windows_amd64.syso )
-
 # ── Clean slate ───────────────────────────────────────────────────────────────
 rm -rf "$OUT_DIR" "$TMP_DIR" tmp_pkg_build  # tmp_pkg_build = legacy name
 mkdir -p "$MAC_OUT" "$WIN_OUT"
-mkdir -p "$TMP_DIR/payload" "$TMP_DIR/scripts" "$TMP_DIR/fendit.iconset"
+mkdir -p "$TMP_DIR/payload" "$TMP_DIR/scripts" "$TMP_DIR/fendit.iconset" "$TMP_DIR/ico_sizes"
 mkdir -p "${INSTALLER_SRC}/embedded"
+
+# ── Step 0a: Generate valid icon.ico from the Fendit logo PNG ────────────────
+# Produces 16/32/48/256 px PNGs via sips, then combines them into a valid
+# multi-size ICO using Python's built-in struct module (no ImageMagick needed).
+echo "[0a/6] Generating Windows icon.ico from logo PNG..."
+SRC_PNG="${INSTALLER_SRC}/assets/fendit.png"
+for size in 16 32 48 256; do
+  sips -z "$size" "$size" "$SRC_PNG" --out "$TMP_DIR/ico_sizes/icon_${size}.png" 2>/dev/null
+done
+python3 - "$TMP_DIR/ico_sizes" "${AGENT_SRC}/icon.ico" << 'PYEOF'
+import struct, sys, glob, os
+ico_dir, out_path = sys.argv[1], sys.argv[2]
+pngs   = sorted(glob.glob(os.path.join(ico_dir, 'icon_*.png')))
+images = [open(p, 'rb').read() for p in pngs]
+count  = len(images)
+offset = 6 + count * 16
+header = struct.pack('<HHH', 0, 1, count)
+entries = b''
+for data in images:
+    w = struct.unpack('>I', data[16:20])[0]
+    h = struct.unpack('>I', data[20:24])[0]
+    entries += struct.pack('<BBBBHHII', min(w, 255), min(h, 255), 0, 0, 1, 32, len(data), offset)
+    offset += len(data)
+with open(out_path, 'wb') as f:
+    f.write(header + entries + b''.join(images))
+sizes = [struct.unpack('>I', open(p,'rb').read()[16:20])[0] for p in pngs]
+print(f"  icon.ico: {count} sizes — {', '.join(str(s)+'px' for s in sizes)}")
+PYEOF
+
+# ── Step 0b: Generate Windows PE version resources ────────────────────────────
+# goversioninfo reads versioninfo.json and emits resource_windows_amd64.syso
+# which go build automatically links into the Windows PE binary.
+# CompanyName, ProductName etc. are used by Defender as a publisher trust signal.
+echo "[0b/6] Generating Windows PE version resources..."
+( cd "$AGENT_SRC"    && GOOS=windows GOARCH=amd64 goversioninfo -icon=icon.ico -o resource_windows_amd64.syso )
+( cd "$INSTALLER_SRC" && GOOS=windows GOARCH=amd64 goversioninfo -o resource_windows_amd64.syso )
 
 # ── Step 0: Generate macOS template tray icon ─────────────────────────────────
 # sips converts the Fendit logo to the 22×22 PNG that the macOS
