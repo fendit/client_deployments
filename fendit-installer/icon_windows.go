@@ -10,125 +10,90 @@ import (
 )
 
 var (
-	modUser32            = windows.NewLazySystemDLL("user32.dll")
-	modKernel32          = windows.NewLazySystemDLL("kernel32.dll")
-	modGdi32             = windows.NewLazySystemDLL("gdi32.dll")
-	modDwmapi            = windows.NewLazySystemDLL("dwmapi.dll")
-	procGetModule        = modKernel32.NewProc("GetModuleHandleW")
-	procLoadImage        = modUser32.NewProc("LoadImageW")
-	procSendMessage      = modUser32.NewProc("SendMessageW")
-	procSetClassLongPtr  = modUser32.NewProc("SetClassLongPtrW")
-	procGetWindowLongPtr = modUser32.NewProc("GetWindowLongPtrW")
-	procSetWindowLongPtr = modUser32.NewProc("SetWindowLongPtrW")
-	procSetLayeredWindow = modUser32.NewProc("SetLayeredWindowAttributes")
-	procCreateSolidBrush = modGdi32.NewProc("CreateSolidBrush")
-	procDwmSetWindowAttr = modDwmapi.NewProc("DwmSetWindowAttribute")
-	procRegisterClassEx  = modUser32.NewProc("RegisterClassExW")
-	procCreateWindowEx   = modUser32.NewProc("CreateWindowExW")
-	procDefWindowProc    = modUser32.NewProc("DefWindowProcW")
-	procGetSystemMetrics = modUser32.NewProc("GetSystemMetrics")
-	procShowWindow       = modUser32.NewProc("ShowWindow")
+	modUser32               = windows.NewLazySystemDLL("user32.dll")
+	modKernel32             = windows.NewLazySystemDLL("kernel32.dll")
+	modGdi32                = windows.NewLazySystemDLL("gdi32.dll")
+	modDwmapi               = windows.NewLazySystemDLL("dwmapi.dll")
+	procGetModule           = modKernel32.NewProc("GetModuleHandleW")
+	procGetCurrentThreadId  = modKernel32.NewProc("GetCurrentThreadId")
+	procLoadImage           = modUser32.NewProc("LoadImageW")
+	procSendMessage         = modUser32.NewProc("SendMessageW")
+	procSetClassLongPtr     = modUser32.NewProc("SetClassLongPtrW")
+	procGetWindowLongPtr    = modUser32.NewProc("GetWindowLongPtrW")
+	procSetWindowLongPtr    = modUser32.NewProc("SetWindowLongPtrW")
+	procSetLayeredWindow    = modUser32.NewProc("SetLayeredWindowAttributes")
+	procSetWindowsHookEx    = modUser32.NewProc("SetWindowsHookExW")
+	procUnhookWindowsHookEx = modUser32.NewProc("UnhookWindowsHookEx")
+	procCallNextHookEx      = modUser32.NewProc("CallNextHookEx")
+	procCreateSolidBrush    = modGdi32.NewProc("CreateSolidBrush")
+	procDwmSetWindowAttr    = modDwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 const (
-	imageIcon          = 1
-	lrDefaultColor     = 0
-	wmSetIcon          = 0x0080
-	iconSmall          = 0
-	iconBig            = 1
-	gclpHbrBackground  = ^uintptr(9)        // GCLP_HBRBACKGROUND = -10
-	gwlExStyle         = ^uintptr(19)       // GWL_EXSTYLE  = -20
-	gwlStyle           = ^uintptr(15)       // GWL_STYLE    = -16
-	wsExLayered        = uintptr(0x80000)   // WS_EX_LAYERED
-	wsExAppWindow      = uintptr(0x40000)   // WS_EX_APPWINDOW
-	wsOverlappedWindow = uintptr(0xCF0000)  // WS_OVERLAPPEDWINDOW
-	wsThickFrame       = uintptr(0x40000)   // WS_THICKFRAME
-	wsMaximizeBox      = uintptr(0x10000)   // WS_MAXIMIZEBOX
-	lwaAlpha           = uintptr(0x2)       // LWA_ALPHA
-	swShow             = uintptr(5)
-	smCxScreen         = uintptr(0)
-	smCyScreen         = uintptr(1)
-	csHredraw          = uint32(0x0002)
-	csVredraw          = uint32(0x0001)
-	dwmwaImmersiveDark    = 20 // Windows 11
-	dwmwaImmersiveDarkOld = 19 // Windows 10 20H1+
+	imageIcon         = 1
+	lrDefaultColor    = 0
+	wmSetIcon         = 0x0080
+	iconSmall         = 0
+	iconBig           = 1
+	gclpHbrBackground = ^uintptr(9)      // GCLP_HBRBACKGROUND = -10
+	gwlExStyle        = ^uintptr(19)     // GWL_EXSTYLE = -20
+	wsExLayered       = uintptr(0x80000) // WS_EX_LAYERED
+	lwaAlpha          = uintptr(0x2)     // LWA_ALPHA
+	whCbt             = uintptr(5)       // WH_CBT
+	dwmwaImmersiveDark    = 20           // Windows 11
+	dwmwaImmersiveDarkOld = 19           // Windows 10 20H1+
 )
 
-// wndClassEx mirrors Win32 WNDCLASSEXW (80 bytes on amd64).
-type wndClassEx struct {
-	cbSize        uint32
-	style         uint32
-	lpfnWndProc   uintptr
-	cbClsExtra    int32
-	cbWndExtra    int32
-	hInstance     uintptr
-	hIcon         uintptr
-	hCursor       uintptr
-	hbrBackground uintptr
-	lpszMenuName  uintptr
-	lpszClassName uintptr
-	hIconSm       uintptr
-}
+// fenditCBTHook holds the HHOOK so the callback can chain to the next hook.
+var fenditCBTHook uintptr
 
-// wndProcCallback is the Win32 window procedure for our host window.
-// Delegates everything to DefWindowProcW — we only own the window, not its messages.
-var wndProcCallback = syscall.NewCallback(func(hwnd, msg, wParam, lParam uintptr) uintptr {
-	ret, _, _ := procDefWindowProc.Call(hwnd, msg, wParam, lParam)
+// fenditCBTProc is a thread-local WH_CBT hook that fires at HCBT_CREATEWND —
+// inside CreateWindowExW, after the HWND is allocated but BEFORE ShowWindow.
+// We set WS_EX_LAYERED + alpha=0 here so the window is invisible at the OS
+// compositor level from the very first WM_PAINT. We only touch top-level windows
+// (hwndParent == 0) to avoid interfering with WebView2's internal child windows.
+//
+// Pointer layout on amd64:
+//   lParam → CBT_CREATEWND { lpcs *CREATESTRUCT (offset 0), ... }
+//   CREATESTRUCT { lpCreateParams (0), hInstance (8), hMenu (16), hwndParent (24), ... }
+var fenditCBTProc = syscall.NewCallback(func(nCode, wParam, lParam uintptr) uintptr {
+	const hcbtCreateWnd = 3
+	if nCode == hcbtCreateWnd && wParam != 0 && lParam != 0 {
+		lpcs := *(*uintptr)(unsafe.Pointer(lParam))
+		if lpcs != 0 {
+			hwndParent := *(*uintptr)(unsafe.Pointer(lpcs + 24))
+			if hwndParent == 0 {
+				exStyle, _, _ := procGetWindowLongPtr.Call(wParam, gwlExStyle)
+				procSetWindowLongPtr.Call(wParam, gwlExStyle, exStyle|wsExLayered)
+				procSetLayeredWindow.Call(wParam, 0, 0, lwaAlpha)
+			}
+		}
+	}
+	ret, _, _ := procCallNextHookEx.Call(fenditCBTHook, nCode, wParam, lParam)
 	return ret
 })
 
-// createAppWindow creates our own Win32 host window with WS_EX_LAYERED at alpha=0
-// BEFORE showing it, so it is fully transparent at the OS level from the very first
-// WM_PAINT. WebView2 is then embedded into this window via NewWithOptions — it never
-// gets a chance to paint a white frame. makeOpaque() reveals the window after the
-// first HTML paint.
-func createAppWindow(width, height int) unsafe.Pointer {
-	hmod, _, _ := procGetModule.Call(0)
-
-	className, _ := windows.UTF16PtrFromString("FenditInstallerClass")
-	wc := wndClassEx{
-		cbSize:        uint32(unsafe.Sizeof(wndClassEx{})),
-		style:         csHredraw | csVredraw,
-		lpfnWndProc:   wndProcCallback,
-		hInstance:     hmod,
-		lpszClassName: uintptr(unsafe.Pointer(className)),
-	}
-	procRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc)))
-
-	// Center on primary monitor.
-	sw, _, _ := procGetSystemMetrics.Call(smCxScreen)
-	sh, _, _ := procGetSystemMetrics.Call(smCyScreen)
-	x := (int(sw) - width) / 2
-	y := (int(sh) - height) / 2
-
-	hwnd, _, _ := procCreateWindowEx.Call(
-		wsExLayered|wsExAppWindow,
-		uintptr(unsafe.Pointer(className)),
-		0, // title is set later by w.SetTitle()
-		wsOverlappedWindow,
-		uintptr(x), uintptr(y),
-		uintptr(width), uintptr(height),
-		0, 0, hmod, 0,
-	)
-	if hwnd == 0 {
-		return nil
-	}
-
-	// alpha=0 must be set BEFORE ShowWindow so no frame is ever composited white.
-	procSetLayeredWindow.Call(hwnd, 0, 0, lwaAlpha)
-	procShowWindow.Call(hwnd, swShow)
-
-	return unsafe.Pointer(hwnd)
+// installCBTHook installs the hook on the current OS thread.
+// Call runtime.LockOSThread() before this so the hook and webview.New() share the same thread.
+func installCBTHook() {
+	tid, _, _ := procGetCurrentThreadId.Call()
+	fenditCBTHook, _, _ = procSetWindowsHookEx.Call(whCbt, fenditCBTProc, 0, tid)
 }
 
-// makeOpaque sets the window to fully visible. Called from JS after the first
-// paint frame — the user only ever sees the fully rendered dark UI.
+func removeCBTHook() {
+	if fenditCBTHook != 0 {
+		procUnhookWindowsHookEx.Call(fenditCBTHook)
+		fenditCBTHook = 0
+	}
+}
+
+// makeOpaque reveals the window (alpha=255). Called from JS after first paint.
 func makeOpaque(hwnd unsafe.Pointer) {
 	procSetLayeredWindow.Call(uintptr(hwnd), 0, 255, lwaAlpha)
 }
 
-// setWindowBackground sets the Win32 class background brush to the Fendit dark
-// colour so any gap between the window edge and WebView2 area paints dark.
+// setWindowBackground paints the window class background dark so any gap between
+// the window edge and the WebView2 area shows the brand colour, not white.
 func setWindowBackground(hwnd unsafe.Pointer) {
 	colorref := uintptr(0x0B) | (uintptr(0x0D) << 8) | (uintptr(0x14) << 16) // #0B0D14
 	hbrush, _, _ := procCreateSolidBrush.Call(colorref)
@@ -137,14 +102,14 @@ func setWindowBackground(hwnd unsafe.Pointer) {
 	}
 }
 
-// setDarkTitleBar enables the Windows immersive dark mode title bar on Win 10 20H1+/11.
+// setDarkTitleBar enables immersive dark mode on the title bar (Win 10 20H1+/11).
 func setDarkTitleBar(hwnd unsafe.Pointer) {
 	val := uint32(1)
 	ret, _, _ := procDwmSetWindowAttr.Call(
 		uintptr(hwnd), dwmwaImmersiveDark,
 		uintptr(unsafe.Pointer(&val)), unsafe.Sizeof(val),
 	)
-	if ret != 0 { // try Windows 10 attribute index
+	if ret != 0 {
 		procDwmSetWindowAttr.Call(
 			uintptr(hwnd), dwmwaImmersiveDarkOld,
 			uintptr(unsafe.Pointer(&val)), unsafe.Sizeof(val),
@@ -152,8 +117,9 @@ func setDarkTitleBar(hwnd unsafe.Pointer) {
 	}
 }
 
-// setWindowIcon loads the EXE's embedded icon (resource ID 1 via goversioninfo)
-// and applies it to the window via WM_SETICON.
+// setWindowIcon sends WM_SETICON to put the EXE's embedded icon (resource ID 1
+// from goversioninfo) into the title bar. go-webview2 sets it on the window
+// class via IconId but WM_SETICON overrides it per-window instance.
 func setWindowIcon(hwnd unsafe.Pointer) {
 	hmod, _, _ := procGetModule.Call(0)
 	hBig, _, _ := procLoadImage.Call(hmod, 1, imageIcon, 32, 32, lrDefaultColor)

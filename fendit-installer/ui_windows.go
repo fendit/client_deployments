@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 
 	webview "github.com/jchv/go-webview2"
@@ -16,18 +17,26 @@ import (
 var iconBytes []byte
 
 func runUI() {
-	// Create our own Win32 window first with WS_EX_LAYERED + alpha=0.
-	// WebView2 is then embedded into it via NewWithOptions, so go-webview2's
-	// internal ShowWindow call can never paint a white frame — the window is
-	// transparent at the OS compositor level before any WM_PAINT fires.
-	hwnd := createAppWindow(500, 680)
-	if hwnd == nil {
-		writeCrashLog("fatal: failed to create application window")
-		showCrashBox(crashLogPath)
-		return
-	}
+	// Lock this goroutine to its OS thread so the CBT hook and webview.New()
+	// run on the same thread (CBT hooks are thread-local).
+	runtime.LockOSThread()
 
-	w := webview.NewWithOptions(webview.WebViewOptions{Window: hwnd, Debug: false})
+	// WH_CBT hook: intercepts CreateWindowExW at HCBT_CREATEWND — after the
+	// HWND is allocated but before ShowWindow is called. Sets WS_EX_LAYERED +
+	// alpha=0 so the window is invisible at the compositor before it's ever shown.
+	installCBTHook()
+	w := webview.NewWithOptions(webview.WebViewOptions{
+		Debug: false,
+		WindowOptions: webview.WindowOptions{
+			Title:  "Fendit Security",
+			Width:  500,
+			Height: 680,
+			IconId: 1, // goversioninfo embeds our icon at resource ID 1
+			Center: true,
+		},
+	})
+	removeCBTHook()
+
 	if w == nil {
 		writeCrashLog("fatal: WebView2 runtime not available — install Microsoft Edge WebView2")
 		showCrashBox(crashLogPath)
@@ -35,9 +44,8 @@ func runUI() {
 	}
 	defer w.Destroy()
 
-	w.SetTitle("Fendit Security")
-	// HintFixed sizes the WebView2 controller and removes resize/maximise styles.
-	w.SetSize(500, 680, webview.HintFixed)
+	hwnd := w.Window()
+	w.SetSize(500, 680, webview.HintFixed) // makes window non-resizable
 	setWindowBackground(hwnd)
 	setDarkTitleBar(hwnd)
 	setWindowIcon(hwnd)
