@@ -26,6 +26,7 @@ func runUI() {
 
 	w.SetTitle("Fendit Security")
 	w.SetSize(500, 680, webview.HintFixed)
+	setWindowIcon(w.Window())
 
 	installer := NewApp()
 
@@ -175,7 +176,6 @@ button.secondary:hover:not(:disabled){background:#363A50}
   <label for="code">Activation Code</label>
   <input id="code" type="text" maxlength="6" placeholder="e.g. A1B2C3"
          autocomplete="off" spellcheck="false">
-  <div class="hint">Provided by your IT administrator</div>
   <hr>
   <button id="btn" onclick="startInstall()">Activate &amp; Install</button>
 </div>

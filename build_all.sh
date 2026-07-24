@@ -2,8 +2,8 @@
 # Fendit Build Pipeline
 #
 # Outputs:
-#   release/windows/fendit_base.exe  — WebView2 GUI installer (Windows amd64)
-#   release/osx/fendit_base.pkg      — Fyne GUI installer (macOS universal, pkg-wrapped)
+#   release/windows/Fendit_Installer.exe  — WebView2 GUI installer (Windows amd64)
+#   release/osx/fendit_installer.pkg  — Fyne GUI installer (macOS universal, pkg-wrapped)
 #
 # Prerequisites (macOS arm64 runner):
 #   go, pkgbuild, lipo, sips, iconutil, x86_64-w64-mingw32-gcc
@@ -77,8 +77,12 @@ PYEOF
 # which go build automatically links into the Windows PE binary.
 # CompanyName, ProductName etc. are used by Defender as a publisher trust signal.
 echo "[0b/6] Generating Windows PE version resources..."
+# Copy the freshly generated ICO to the installer source so goversioninfo can
+# embed it there too (gives the installer EXE a file icon in Downloads/Explorer
+# AND lets setWindowIcon() load it at runtime for the title bar).
+cp "${AGENT_SRC}/icon.ico" "${INSTALLER_SRC}/icon.ico"
 ( cd "$AGENT_SRC"    && GOOS=windows GOARCH=amd64 goversioninfo -icon=icon.ico -o resource_windows_amd64.syso )
-( cd "$INSTALLER_SRC" && GOOS=windows GOARCH=amd64 goversioninfo -o resource_windows_amd64.syso )
+( cd "$INSTALLER_SRC" && GOOS=windows GOARCH=amd64 goversioninfo -icon=icon.ico -o resource_windows_amd64.syso )
 
 # ── Step 0: Generate macOS template tray icon ─────────────────────────────────
 # sips converts the Fendit logo to the 22×22 PNG that the macOS
@@ -128,7 +132,7 @@ echo "[3/6] Building Windows installer (Fyne/Go → amd64)..."
   CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
   go build \
     -ldflags "-H windowsgui -s -w" \
-    -o "../$WIN_OUT/fendit_base.exe" \
+    -o "../$WIN_OUT/Fendit_Installer.exe" \
     . )
 
 rm -f "${INSTALLER_SRC}/embedded/fendit-agent-win.exe"
@@ -208,7 +212,7 @@ pkgbuild \
   --identifier       "eu.fendit.installer" \
   --version          "${VERSION}" \
   --install-location "/Applications" \
-  "$MAC_OUT/fendit_base.pkg"
+  "$MAC_OUT/fendit_installer.pkg"
 
 # ── Step 6: Clean up ──────────────────────────────────────────────────────────
 echo "[6/6] Cleaning up..."
@@ -216,5 +220,5 @@ rm -rf "$TMP_DIR"
 
 echo ""
 echo "Build complete!"
-echo "  Windows: ./$WIN_OUT/fendit_base.exe"
-echo "  macOS:   ./$MAC_OUT/fendit_base.pkg"
+echo "  Windows: ./$WIN_OUT/Fendit_Installer.exe"
+echo "  macOS:   ./$MAC_OUT/fendit_installer.pkg"

@@ -65,15 +65,12 @@ func runUI() {
 	codeLabel.TextStyle = fyne.TextStyle{Bold: true}
 
 	codeEntry := widget.NewEntry()
-	codeEntry.SetPlaceHolder("Enter 6-character code  (e.g. A1B2C3)")
+	codeEntry.SetPlaceHolder("e.g. A1B2C3")
 	codeEntry.OnChanged = func(s string) {
 		if up := strings.ToUpper(s); up != s {
 			codeEntry.SetText(up)
 		}
 	}
-
-	hintLabel := widget.NewLabel("Provided by your IT administrator")
-	hintLabel.Importance = widget.LowImportance
 
 	// ── Progress area ─────────────────────────────────────────────────────────
 	spinner := widget.NewProgressBarInfinite()
@@ -177,7 +174,6 @@ func runUI() {
 	formContent := container.NewVBox(
 		codeLabel,
 		codeEntry,
-		hintLabel,
 		widget.NewSeparator(),
 		installBtn,
 	)
