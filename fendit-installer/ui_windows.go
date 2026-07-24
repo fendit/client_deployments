@@ -81,6 +81,11 @@ func runUI() {
 		w.Dispatch(func() { w.Terminate() })
 	})
 
+	// Belt-and-suspenders: if the CBT alpha=0 trick fails on some configs,
+	// this ensures the html element background is dark from document-start
+	// so WebView2 never paints a white frame regardless.
+	w.Init(`document.documentElement.style.cssText='background:#0B0D14;margin:0'`)
+
 	logoB64 := base64.StdEncoding.EncodeToString(iconBytes)
 	html := strings.Replace(installerHTML, "{{LOGO}}", logoB64, 1)
 	w.SetHtml(html)
@@ -97,7 +102,7 @@ const installerHTML = `<!DOCTYPE html>
 ::-webkit-scrollbar{width:4px}
 ::-webkit-scrollbar-track{background:#0B0D14}
 ::-webkit-scrollbar-thumb{background:#2A2D3E;border-radius:2px}
-html,body{height:100%;overflow:hidden}
+html,body{background:#0B0D14;height:100%;overflow:hidden}
 body{
   background:#0B0D14;
   color:#F0F2FF;
@@ -277,7 +282,21 @@ function setStatus(msg,cls){
   st.textContent=msg;
   st.className='status'+(cls?' '+cls:'');
 }
-window.addEventListener('load',()=>setTimeout(()=>goReady(),150));
+// Reveal the window only after first contentful paint so the user never
+// sees the white WebView2 loading state. PerformanceObserver fires when
+// Chromium has actually composited content; one rAF ensures DWM has the
+// frame before makeOpaque is called. window.load+100ms is the fallback.
+var _rdy=false;
+function _show(){if(!_rdy){_rdy=true;requestAnimationFrame(function(){goReady();});}}
+try{
+  var _po=new PerformanceObserver(function(list){
+    list.getEntries().forEach(function(e){
+      if(e.name==='first-contentful-paint'){_po.disconnect();_show();}
+    });
+  });
+  _po.observe({type:'paint',buffered:true});
+}catch(e){}
+window.addEventListener('load',function(){setTimeout(_show,100);});
 </script>
 </body>
 </html>`
