@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// On Windows, interactive installation is handled exclusively by fendit_base.exe
+// On Windows, interactive installation is handled exclusively by fendit_installer.exe
 // (the Wails GUI installer). The agent binary runs as a system service or via
 // RMM silent deployment (--code flag). fatalDialog/inputDialog keep the package
 // buildable for that path.
@@ -21,7 +21,7 @@ func fatalDialog(_, msg string) {
 }
 
 func inputDialog(_, _ string) string {
-	fmt.Println("Please use fendit_base.exe to install Fendit Security on Windows.")
+	fmt.Println("Please use fendit_installer.exe to install Fendit Security on Windows.")
 	return "" // empty → runActivationSetup calls os.Exit(0) gracefully
 }
 

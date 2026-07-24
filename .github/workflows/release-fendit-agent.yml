@@ -61,5 +61,5 @@ jobs:
           name: Release ${{ steps.tag_version.outputs.new_tag }}
           generate_release_notes: true
           files: |
-            release/windows/Fendit_Installer.exe
+            release/windows/fendit_installer.exe
             release/osx/fendit_installer.pkg

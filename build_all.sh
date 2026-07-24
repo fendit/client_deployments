@@ -2,7 +2,7 @@
 # Fendit Build Pipeline
 #
 # Outputs:
-#   release/windows/Fendit_Installer.exe  — WebView2 GUI installer (Windows amd64)
+#   release/windows/fendit_installer.exe  — WebView2 GUI installer (Windows amd64)
 #   release/osx/fendit_installer.pkg  — Fyne GUI installer (macOS universal, pkg-wrapped)
 #
 # Prerequisites (macOS arm64 runner):
@@ -132,7 +132,7 @@ echo "[3/6] Building Windows installer (Fyne/Go → amd64)..."
   CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
   go build \
     -ldflags "-H windowsgui -s -w" \
-    -o "../$WIN_OUT/Fendit_Installer.exe" \
+    -o "../$WIN_OUT/fendit_installer.exe" \
     . )
 
 rm -f "${INSTALLER_SRC}/embedded/fendit-agent-win.exe"
@@ -220,5 +220,5 @@ rm -rf "$TMP_DIR"
 
 echo ""
 echo "Build complete!"
-echo "  Windows: ./$WIN_OUT/Fendit_Installer.exe"
+echo "  Windows: ./$WIN_OUT/fendit_installer.exe"
 echo "  macOS:   ./$MAC_OUT/fendit_installer.pkg"
