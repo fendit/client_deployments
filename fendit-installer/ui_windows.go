@@ -26,6 +26,7 @@ func runUI() {
 
 	w.SetTitle("Fendit Security")
 	w.SetSize(500, 680, webview.HintFixed)
+	setWindowBackground(w.Window())
 	setWindowIcon(w.Window())
 
 	installer := NewApp()
