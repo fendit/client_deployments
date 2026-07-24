@@ -28,17 +28,17 @@ func runUI() {
 	w.SetSize(500, 680, webview.HintFixed)
 
 	hwnd := w.Window()
+	makeTransparent(hwnd) // alpha=0 before first WM_PAINT — no white frame ever visible
 	setWindowBackground(hwnd)
 	setDarkTitleBar(hwnd)
 	setWindowIcon(hwnd)
-	hideWindow(hwnd) // stay hidden until first paint to eliminate white flash
 
 	installer := NewApp()
 
-	// goReady is called by JS on DOMContentLoaded — reveals the window only
-	// after the dark background is already painted, so no white flash is seen.
+	// goReady is called by JS after window.load + one rAF, guaranteeing the
+	// first paint has completed before the window becomes visible.
 	_ = w.Bind("goReady", func() {
-		w.Dispatch(func() { showWindow(hwnd) })
+		w.Dispatch(func() { makeOpaque(hwnd) })
 	})
 
 	_ = w.Bind("goInstall", func(code string) {
@@ -261,7 +261,7 @@ function setStatus(msg,cls){
   st.textContent=msg;
   st.className='status'+(cls?' '+cls:'');
 }
-document.addEventListener('DOMContentLoaded',()=>goReady());
+window.addEventListener('load',()=>requestAnimationFrame(()=>goReady()));
 </script>
 </body>
 </html>`
