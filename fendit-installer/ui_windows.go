@@ -16,7 +16,18 @@ import (
 var iconBytes []byte
 
 func runUI() {
-	w := webview.New(false)
+	// Create our own Win32 window first with WS_EX_LAYERED + alpha=0.
+	// WebView2 is then embedded into it via NewWithOptions, so go-webview2's
+	// internal ShowWindow call can never paint a white frame — the window is
+	// transparent at the OS compositor level before any WM_PAINT fires.
+	hwnd := createAppWindow(500, 680)
+	if hwnd == nil {
+		writeCrashLog("fatal: failed to create application window")
+		showCrashBox(crashLogPath)
+		return
+	}
+
+	w := webview.NewWithOptions(webview.WebViewOptions{Window: hwnd, Debug: false})
 	if w == nil {
 		writeCrashLog("fatal: WebView2 runtime not available — install Microsoft Edge WebView2")
 		showCrashBox(crashLogPath)
@@ -25,18 +36,15 @@ func runUI() {
 	defer w.Destroy()
 
 	w.SetTitle("Fendit Security")
+	// HintFixed sizes the WebView2 controller and removes resize/maximise styles.
 	w.SetSize(500, 680, webview.HintFixed)
-
-	hwnd := w.Window()
-	makeTransparent(hwnd) // alpha=0 before first WM_PAINT — no white frame ever visible
 	setWindowBackground(hwnd)
 	setDarkTitleBar(hwnd)
 	setWindowIcon(hwnd)
 
 	installer := NewApp()
 
-	// goReady is called by JS after window.load + one rAF, guaranteeing the
-	// first paint has completed before the window becomes visible.
+	// goReady is called by JS after window.load + one rAF — first paint is done.
 	_ = w.Bind("goReady", func() {
 		w.Dispatch(func() { makeOpaque(hwnd) })
 	})
