@@ -26,10 +26,20 @@ func runUI() {
 
 	w.SetTitle("Fendit Security")
 	w.SetSize(500, 680, webview.HintFixed)
-	setWindowBackground(w.Window())
-	setWindowIcon(w.Window())
+
+	hwnd := w.Window()
+	setWindowBackground(hwnd)
+	setDarkTitleBar(hwnd)
+	setWindowIcon(hwnd)
+	hideWindow(hwnd) // stay hidden until first paint to eliminate white flash
 
 	installer := NewApp()
+
+	// goReady is called by JS on DOMContentLoaded — reveals the window only
+	// after the dark background is already painted, so no white flash is seen.
+	_ = w.Bind("goReady", func() {
+		w.Dispatch(func() { showWindow(hwnd) })
+	})
 
 	_ = w.Bind("goInstall", func(code string) {
 		go func() {
@@ -251,6 +261,7 @@ function setStatus(msg,cls){
   st.textContent=msg;
   st.className='status'+(cls?' '+cls:'');
 }
+document.addEventListener('DOMContentLoaded',()=>goReady());
 </script>
 </body>
 </html>`
