@@ -277,7 +277,7 @@ function setStatus(msg,cls){
   st.textContent=msg;
   st.className='status'+(cls?' '+cls:'');
 }
-window.addEventListener('load',()=>requestAnimationFrame(()=>goReady()));
+window.addEventListener('load',()=>setTimeout(()=>goReady(),150));
 </script>
 </body>
 </html>`
