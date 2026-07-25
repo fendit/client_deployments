@@ -318,7 +318,7 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 	}
 
 	w.hwnd, _, _ = w32.User32CreateWindowExW.Call(
-		0,
+		w32.WSExLayered, // born layered: DWM won't composite until MakeOpaque is called
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(windowName)),
 		0xCF0000, // WS_OVERLAPPEDWINDOW
@@ -333,9 +333,13 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 	)
 	setWindowContext(w.hwnd, w)
 
-	// Window is kept hidden on creation; the caller reveals it after content is
-	// ready via ShowWindow. This prevents the white-flash that occurs when WebView2
-	// takes several seconds to initialise while the window is already visible.
+	// Alpha=0: window is transparent to DWM from the moment it's shown.
+	// WebView2 still renders normally (it doesn't care about DWM alpha).
+	// MakeOpaque() sets alpha=255 when content is ready.
+	_, _, _ = w32.User32SetLayeredWindowAttributes.Call(w.hwnd, 0, 0, w32.LWAAlpha)
+
+	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
+	_, _, _ = w32.User32UpdateWindow.Call(w.hwnd)
 	_, _, _ = w32.User32SetFocus.Call(w.hwnd)
 
 	if !w.browser.Embed(w.hwnd) {
@@ -446,6 +450,10 @@ func (w *webview) Dispatch(f func()) {
 	w.dispatchq = append(w.dispatchq, f)
 	w.m.Unlock()
 	_, _, _ = w32.User32PostThreadMessageW.Call(w.mainthread, w32.WMApp, 0, 0)
+}
+
+func (w *webview) MakeOpaque() {
+	_, _, _ = w32.User32SetLayeredWindowAttributes.Call(w.hwnd, 0, 255, w32.LWAAlpha)
 }
 
 func (w *webview) Bind(name string, f interface{}) error {

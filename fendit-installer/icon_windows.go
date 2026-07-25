@@ -17,7 +17,6 @@ var (
 	procLoadImage       = modUser32.NewProc("LoadImageW")
 	procSendMessage     = modUser32.NewProc("SendMessageW")
 	procSetClassLongPtr = modUser32.NewProc("SetClassLongPtrW")
-	procShowWindow      = modUser32.NewProc("ShowWindow")
 	procCreateSolidBrush = modGdi32.NewProc("CreateSolidBrush")
 	procDwmSetWindowAttr = modDwmapi.NewProc("DwmSetWindowAttribute")
 )
@@ -28,19 +27,10 @@ const (
 	wmSetIcon         = 0x0080
 	iconSmall         = 0
 	iconBig           = 1
-	gclpHbrBackground = ^uintptr(9)  // GCLP_HBRBACKGROUND = -10
-	swShowNA          = uintptr(8)   // SW_SHOWNA: show without activating
-	dwmwaImmersiveDark    = 20       // Windows 11
-	dwmwaImmersiveDarkOld = 19       // Windows 10 20H1+
+	gclpHbrBackground = ^uintptr(9) // GCLP_HBRBACKGROUND = -10
+	dwmwaImmersiveDark    = 20      // Windows 11
+	dwmwaImmersiveDarkOld = 19      // Windows 10 20H1+
 )
-
-// makeOpaque reveals the window for the first time. Called from JS after
-// first-contentful-paint so the user only ever sees the fully-rendered UI.
-// go-webview2-local omits the ShowWindow call in CreateWithOptions so the
-// window is hidden until this function runs.
-func makeOpaque(hwnd unsafe.Pointer) {
-	procShowWindow.Call(uintptr(hwnd), swShowNA)
-}
 
 // setWindowBackground paints the window class background dark so any gap
 // between the window edge and the WebView2 area shows the brand colour.

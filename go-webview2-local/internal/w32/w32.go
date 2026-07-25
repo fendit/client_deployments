@@ -40,10 +40,11 @@ var (
 	User32GetWindowLongPtrW  = user32.NewProc("GetWindowLongPtrW")
 	User32SetWindowLongW     = user32.NewProc("SetWindowLongW")
 	User32SetWindowLongPtrW  = user32.NewProc("SetWindowLongPtrW")
-	User32AdjustWindowRect   = user32.NewProc("AdjustWindowRect")
-	User32SetWindowPos       = user32.NewProc("SetWindowPos")
-	User32IsDialogMessage    = user32.NewProc("IsDialogMessage")
-	User32GetAncestor        = user32.NewProc("GetAncestor")
+	User32AdjustWindowRect             = user32.NewProc("AdjustWindowRect")
+	User32SetWindowPos                 = user32.NewProc("SetWindowPos")
+	User32IsDialogMessage              = user32.NewProc("IsDialogMessage")
+	User32GetAncestor                  = user32.NewProc("GetAncestor")
+	User32SetLayeredWindowAttributes   = user32.NewProc("SetLayeredWindowAttributes")
 )
 
 const (
@@ -81,6 +82,11 @@ const (
 	SWPNoActivate   = 0x0010
 	SWPNoMove       = 0x0002
 	SWPFrameChanged = 0x0020
+)
+
+const (
+	WSExLayered = 0x00080000 // WS_EX_LAYERED: window visible to DWM only after SLA call
+	LWAAlpha    = 0x2        // SetLayeredWindowAttributes flag: use bAlpha channel
 )
 
 const (

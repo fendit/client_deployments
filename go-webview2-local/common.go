@@ -81,4 +81,8 @@ type WebView interface {
 	// f must be a function
 	// f must return either value and error or just error
 	Bind(name string, f interface{}) error
+
+	// MakeOpaque reveals the window by setting the layered-window alpha to 255.
+	// Call this once after content is painted to show the window with no flash.
+	MakeOpaque()
 }

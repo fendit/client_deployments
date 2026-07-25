@@ -45,10 +45,12 @@ func runUI() {
 
 	installer := NewApp()
 
-	// goReady: called from JS on first-contentful-paint. makeOpaque calls
-	// ShowWindow for the first time — user sees only the fully-rendered UI.
+	// goReady: called from JS on window.load. The window was born with
+	// WS_EX_LAYERED+alpha=0 (transparent to DWM), so WebView2 has been
+	// rendering unseen. MakeOpaque sets alpha=255 — the fully-painted UI
+	// appears in one shot with no white flash.
 	_ = w.Bind("goReady", func() {
-		w.Dispatch(func() { makeOpaque(hwnd) })
+		w.Dispatch(func() { w.MakeOpaque() })
 	})
 
 	_ = w.Bind("goInstall", func(code string) {
