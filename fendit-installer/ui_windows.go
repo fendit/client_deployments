@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"runtime"
 	"strings"
 
 	webview "github.com/jchv/go-webview2"
@@ -17,25 +16,19 @@ import (
 var iconBytes []byte
 
 func runUI() {
-	// Lock this goroutine to its OS thread so the CBT hook and webview.New()
-	// run on the same thread (CBT hooks are thread-local).
-	runtime.LockOSThread()
-
-	// WH_CBT hook: intercepts CreateWindowExW at HCBT_CREATEWND — after the
-	// HWND is allocated but before ShowWindow is called. Sets WS_EX_LAYERED +
-	// alpha=0 so the window is invisible at the compositor before it's ever shown.
-	installCBTHook()
+	// go-webview2-local omits ShowWindow in CreateWithOptions so the window
+	// stays hidden during WebView2 initialisation (several seconds). makeOpaque
+	// reveals it only after first-contentful-paint via the goReady JS binding.
 	w := webview.NewWithOptions(webview.WebViewOptions{
 		Debug: false,
 		WindowOptions: webview.WindowOptions{
 			Title:  "Fendit Security",
 			Width:  500,
 			Height: 680,
-			IconId: 1, // goversioninfo embeds our icon at resource ID 1
+			IconId: 1,
 			Center: true,
 		},
 	})
-	removeCBTHook()
 
 	if w == nil {
 		writeCrashLog("fatal: WebView2 runtime not available — install Microsoft Edge WebView2")
@@ -52,7 +45,8 @@ func runUI() {
 
 	installer := NewApp()
 
-	// goReady is called by JS after window.load + one rAF — first paint is done.
+	// goReady: called from JS on first-contentful-paint. makeOpaque calls
+	// ShowWindow for the first time — user sees only the fully-rendered UI.
 	_ = w.Bind("goReady", func() {
 		w.Dispatch(func() { makeOpaque(hwnd) })
 	})

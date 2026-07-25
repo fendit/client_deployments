@@ -40,3 +40,7 @@ require (
 	golang.org/x/text v0.16.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// Local fork that keeps the window hidden at creation time so we can reveal
+// it only after WebView2 has painted content (no white-flash on startup).
+replace github.com/jchv/go-webview2 => ../go-webview2-local
