@@ -276,21 +276,10 @@ function setStatus(msg,cls){
   st.textContent=msg;
   st.className='status'+(cls?' '+cls:'');
 }
-// Reveal the window only after first contentful paint so the user never
-// sees the white WebView2 loading state. PerformanceObserver fires when
-// Chromium has actually composited content; one rAF ensures DWM has the
-// frame before makeOpaque is called. window.load+100ms is the fallback.
-var _rdy=false;
-function _show(){if(!_rdy){_rdy=true;requestAnimationFrame(function(){goReady();});}}
-try{
-  var _po=new PerformanceObserver(function(list){
-    list.getEntries().forEach(function(e){
-      if(e.name==='first-contentful-paint'){_po.disconnect();_show();}
-    });
-  });
-  _po.observe({type:'paint',buffered:true});
-}catch(e){}
-window.addEventListener('load',function(){setTimeout(_show,100);});
+// The Win32 window is hidden until goReady() calls ShowWindow for the
+// first time. window.load fires when HTML is fully parsed — no delay needed
+// because there is no white-flash risk while the window is hidden.
+window.addEventListener('load',function(){goReady();});
 </script>
 </body>
 </html>`
