@@ -20,11 +20,11 @@
   },
   "StringFileInfo": {
     "Comments": "",
-    "CompanyName": "Acetos BV (BE0803.216.814)",
+    "CompanyName": "Acetos BV",
     "FileDescription": "Fendit Security Installer",
     "FileVersion": "1.0.0.0",
     "InternalName": "fendit-installer",
-    "LegalCopyright": "Copyright 2025 Acetos BV. Fendit is a brand of Acetos BV (BE0803.216.814).",
+    "LegalCopyright": "Copyright 2026 Acetos BV. Fendit is a brand of Acetos BV",
     "LegalTrademarks": "Fendit is a trademark of Acetos BV",
     "OriginalFilename": "fendit_installer.exe",
     "PrivateBuild": "",
