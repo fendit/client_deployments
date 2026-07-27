@@ -77,6 +77,25 @@ PYEOF
 # which go build automatically links into the Windows PE binary.
 # CompanyName, ProductName etc. are used by Defender as a publisher trust signal.
 echo "[0b/6] Generating Windows PE version resources..."
+
+# Patch versioninfo.json files with the current build version before goversioninfo runs.
+python3 - "${VERSION}" "${AGENT_SRC}/versioninfo.json" "${INSTALLER_SRC}/versioninfo.json" << 'PYEOF'
+import json, sys
+ver = sys.argv[1].lstrip('v')
+parts = (ver.split('.') + ['0', '0', '0'])[:3]
+major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
+for path in sys.argv[2:]:
+    with open(path, 'r') as f:
+        data = json.load(f)
+    for key in ('FileVersion', 'ProductVersion'):
+        data['FixedFileInfo'][key] = {'Major': major, 'Minor': minor, 'Patch': patch, 'Build': 0}
+    data['StringFileInfo']['FileVersion'] = f'{major}.{minor}.{patch}.0'
+    data['StringFileInfo']['ProductVersion'] = f'{major}.{minor}.{patch}'
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+    print(f'  {path} → {major}.{minor}.{patch}')
+PYEOF
+
 # Copy the freshly generated ICO to the installer source so goversioninfo can
 # embed it there too (gives the installer EXE a file icon in Downloads/Explorer
 # AND lets setWindowIcon() load it at runtime for the title bar).
