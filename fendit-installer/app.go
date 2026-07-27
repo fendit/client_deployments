@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -114,25 +115,35 @@ func (a *App) Install(code string) (err error) {
 	log.Info("installation started", "code", code, "hostname", hostname)
 	writeCrashLog("Install() entered, code=" + code)
 
-	// ── Phase 0: Defender exclusions — must run before any file writes ────────
-	a.setProgress("Configuring security co-existence...")
-	addDefenderExclusions()
+	// ── Phase 0: Defender exclusions — fire and forget in background ─────────
+	// PowerShell Add-MpPreference takes ~8 s. We let it run during the slow MSI
+	// download + install (40–90 s combined) so the user never sees a wait.
+	// The goroutine is joined just before we write the agent binary, which is
+	// the one file that actually needs the path exclusion in place.
+	var defenderWg sync.WaitGroup
+	defenderWg.Add(1)
+	go func() {
+		defer defenderWg.Done()
+		addDefenderExclusions()
+	}()
 
 	// ── Phase 1: API activation ───────────────────────────────────────────────
 	a.setProgress("Connecting to Fendit cloud...")
 	act, err := a.callActivate(code, hostname)
 	if err != nil {
+		defenderWg.Wait() // drain goroutine before returning
 		log.Error("API activation failed", "err", err)
 		return fmt.Errorf("activation failed: %w", err)
 	}
 	log.Info("activation OK", "org", act.OrganizationName, "session", act.SessionID)
 
 	// ── Phase 2: Download Wazuh MSI ───────────────────────────────────────────
+	// The Wazuh MSI is code-signed; Defender will not block it before the path
+	// exclusion is applied.  Download into fenditDir (already created by NewApp).
 	a.setProgress("Downloading security components...")
-	// Download into the already-excluded fenditDir so Defender never scans the
-	// MSI as it lands on disk (os.TempDir() is unexcluded and gets scanned).
 	msiPath := filepath.Join(fenditDir, "fendit_wazuh.msi")
 	if err := a.downloadMSI(msiPath, act.AgentURL); err != nil {
+		defenderWg.Wait()
 		log.Error("download failed", "err", err)
 		a.rollback(act)
 		go ReportInstallFailure("Wazuh MSI download failed", err)
@@ -151,6 +162,7 @@ func (a *App) Install(code string) (err error) {
 	// ── Phase 4: Silent MSI install ───────────────────────────────────────────
 	a.setProgress("Installing security agent...")
 	if err := a.installMSI(msiPath); err != nil {
+		defenderWg.Wait()
 		log.Error("MSI install failed", "err", err)
 		a.rollback(act)
 		go ReportInstallFailure("Wazuh MSI install failed (msiexec)", err)
@@ -164,6 +176,10 @@ func (a *App) Install(code string) (err error) {
 	}
 
 	// ── Phase 6: Save config + deploy daemon ──────────────────────────────────
+	// Defender exclusions must be done before fendit-agent.exe is written to disk.
+	// By this point ~40–90 s have elapsed since the goroutine started — it is
+	// virtually always already done; Wait() returns in microseconds.
+	defenderWg.Wait()
 	a.setProgress("Finalising setup...")
 	apiBase := act.APIBase
 	if apiBase == "" {
@@ -295,7 +311,21 @@ func (a *App) registerWazuhAgent(act *ActivateResponse) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Warn("agent-auth failed (non-fatal)", "err", err, "output", string(out))
+		outStr := string(out)
+		log.Warn("agent-auth failed (non-fatal)", "err", err, "output", outStr)
+		// If the group doesn't exist yet (created async by backend), retry without -G.
+		// The backend will assign the agent to the correct group via the Wazuh API.
+		if act.InstallGroup != "" && strings.Contains(outStr, "Invalid group") {
+			log.Info("agent-auth retry without group", "manager", act.WazuhManager)
+			retry := exec.Command(wazuhAuthBin, "-m", act.WazuhManager)
+			retry.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			retryOut, retryErr := retry.CombinedOutput()
+			if retryErr != nil {
+				log.Warn("agent-auth retry also failed (non-fatal)", "err", retryErr, "output", string(retryOut))
+			} else {
+				log.Info("agent-auth retry OK", "manager", act.WazuhManager)
+			}
+		}
 	} else {
 		log.Info("agent-auth OK", "manager", act.WazuhManager)
 	}
@@ -319,7 +349,7 @@ func (a *App) deployDaemon() error {
 		log.Warn("Run key registration failed (non-fatal)", "err", err)
 	}
 	tray := exec.Command(dest, "--tray")
-	tray.SysProcAttr = &syscall.SysProcAttr{HideWindow: false}
+	tray.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	tray.Start() //nolint:errcheck
 	return nil
 }

@@ -30,16 +30,32 @@ func lastScanStatus() string {
 	return strings.TrimSpace(string(b))
 }
 
-// yaraRulesUpdatedAt returns the mtime of mcp_rules.yarc as RFC3339, or "".
-// Wazuh's remoted daemon writes this file whenever Guardian pushes updated rules,
-// so its mtime is a reliable proxy for "when were detection rules last refreshed".
+// yaraRulesUpdatedAt returns the mtime of the most recently updated mcp_rules.yar
+// across all Wazuh shared group directories as RFC3339, or "".
+//
+// Wazuh places an agent in its tenant group (e.g. etc/shared/vdpo_be/) rather than
+// etc/shared/default/ when registered with -G.  We scan all group subdirectories so
+// this works regardless of which group the agent is assigned to.
 func yaraRulesUpdatedAt() string {
-	const path = "/Library/Ossec/etc/shared/default/mcp_rules.yarc"
-	info, err := os.Stat(path)
+	const base = "/Library/Ossec/etc/shared"
+	entries, err := os.ReadDir(base)
 	if err != nil {
 		return ""
 	}
-	return info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+	var latest string // RFC3339 — lexicographically sortable
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(base, e.Name(), "mcp_rules.yar"))
+		if err != nil {
+			continue
+		}
+		if t := info.ModTime().UTC().Format("2006-01-02T15:04:05Z"); t > latest {
+			latest = t
+		}
+	}
+	return latest
 }
 
 // wazuhVersion reads the installed Wazuh version on macOS.

@@ -21,6 +21,9 @@ func runUI() {
 	// reveals it only after first-contentful-paint via the goReady JS binding.
 	w := webview.NewWithOptions(webview.WebViewOptions{
 		Debug: false,
+		// DataPath: fixed name under ProgramData so the WebView2 user-data
+		// folder is not named after the exe ("fendit_installer.exe").
+		DataPath: fenditDir + `\installer-cache`,
 		WindowOptions: webview.WindowOptions{
 			Title:  "Fendit Security",
 			Width:  500,
@@ -255,11 +258,17 @@ function onInstallSuccess(){
   d.textContent='✓  Installation complete!';
   log.appendChild(d);
   log.scrollTop=log.scrollHeight;
-  setStatus('Fendit Security Agent is now protecting this device.','ok');
-  btn.textContent='Close';
+  setStatus('Fendit Security is now protecting this device.','ok');
+  let secs=3;
+  btn.textContent='Close ('+secs+')';
   btn.className='secondary';
-  btn.onclick=()=>goClose();
   btn.disabled=false;
+  btn.onclick=()=>{clearInterval(iv);goClose();};
+  const iv=setInterval(()=>{
+    secs--;
+    if(secs<=0){clearInterval(iv);goClose();}
+    else btn.textContent='Close ('+secs+')';
+  },1000);
 }
 
 function onInstallError(msg){

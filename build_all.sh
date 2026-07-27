@@ -102,12 +102,12 @@ echo "[1/6] Compiling macOS agent daemon (arm64 + amd64 → universal)..."
 
 ( cd "$AGENT_SRC" && \
   CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
-  go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/embedded/fendit-agent-arm64" . )
+  go build -ldflags "-X main.version=${VERSION} -s -w" -o "../${INSTALLER_SRC}/embedded/fendit-agent-arm64" . )
 
 ( cd "$AGENT_SRC" && \
   CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
   CC="clang -arch x86_64" \
-  go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/embedded/fendit-agent-amd64" . )
+  go build -ldflags "-X main.version=${VERSION} -s -w" -o "../${INSTALLER_SRC}/embedded/fendit-agent-amd64" . )
 
 rm -rf "${INSTALLER_SRC}/embedded/fendit-agent-mac"
 lipo -create \
@@ -119,10 +119,13 @@ rm -f "${INSTALLER_SRC}/embedded/fendit-agent-arm64" \
       "${INSTALLER_SRC}/embedded/fendit-agent-amd64"
 
 # ── Step 2: Cross-compile Windows agent ──────────────────────────────────────
+# -H windowsgui: GUI subsystem flag — prevents Windows from allocating a console
+# window when the agent is spawned by a GUI process (installer, SCM).
+# stdout/stderr are still captured when a parent provides handles (RMM tools).
 echo "[2/6] Compiling Windows agent daemon..."
 ( cd "$AGENT_SRC" && \
   CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-  go build -ldflags "-s -w" -o "../${INSTALLER_SRC}/embedded/fendit-agent-win.exe" . )
+  go build -ldflags "-H windowsgui -X main.version=${VERSION} -s -w" -o "../${INSTALLER_SRC}/embedded/fendit-agent-win.exe" . )
 
 # ── Step 3: Build Windows installer (Fyne) ───────────────────────────────────
 # CGO required for Fyne (OpenGL). -H windowsgui suppresses the console window.

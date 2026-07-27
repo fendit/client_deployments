@@ -205,9 +205,13 @@ func installSelf() error {
 		fmt.Printf("[!] Run key registration failed (niet-fataal): %v\n", err)
 	}
 
-	// Launch the tray immediately for the current interactive session.
-	// HideWindow is intentionally false — the tray icon is expected to appear.
-	exec.Command(agentBinDst, "--tray").Start() //nolint:errcheck
+	// Launch the tray for the current interactive session.
+	// HideWindow: true prevents a stray console window when the binary is spawned
+	// by a GUI process. The tray icon still appears via systray — it is separate
+	// from the console window.
+	tray := exec.Command(agentBinDst, "--tray")
+	tray.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	tray.Start() //nolint:errcheck
 	return nil
 }
 
