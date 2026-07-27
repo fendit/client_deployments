@@ -236,9 +236,8 @@ func (a *App) installWazuhViaPowerShell(act *ActivateResponse) error {
 	// -WindowStyle Hidden on Start-Process prevents any msiexec window from flashing.
 	// Start-Sleep gives the SCM a moment to register the service before we start it.
 	ps := fmt.Sprintf(
-		"$ProgressPreference='SilentlyContinue'"+
-			";$msi=\"$env:TEMP\\fendit_wazuh.msi\""+
-			";Invoke-WebRequest -Uri '%s' -OutFile $msi -UseBasicParsing"+
+		"$msi=\"$env:TEMP\\fendit_wazuh.msi\""+
+			";Start-BitsTransfer -Source '%s' -Destination $msi"+
 			";$p=Start-Process msiexec.exe -Wait -PassThru -WindowStyle Hidden -ArgumentList @(%s)"+
 			";Remove-Item $msi -Force -ErrorAction SilentlyContinue"+
 			";if($p.ExitCode -ne 0){exit $p.ExitCode}"+
@@ -249,7 +248,6 @@ func (a *App) installWazuhViaPowerShell(act *ActivateResponse) error {
 
 	cmd := exec.Command("powershell.exe",
 		"-NonInteractive", "-NoProfile",
-		"-ExecutionPolicy", "Bypass",
 		"-Command", ps,
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
