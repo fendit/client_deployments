@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -38,16 +37,13 @@ const (
 
 	fenditDir    = `C:\ProgramData\Fendit`
 	fenditConfig = `C:\ProgramData\Fendit\config`
-	agentBinDst  = `C:\Program Files\Fendit\fendit-agent.exe`
-	wazuhAuthBin = `C:\Program Files (x86)\ossec-agent\agent-auth.exe`
-	installLog   = `C:\ProgramData\Fendit\install.log`
-	msiLog       = `C:\Windows\Temp\fendit_wazuh_install.log`
+	agentBinDst = `C:\Program Files\Fendit\fendit-agent.exe`
+	installLog  = `C:\ProgramData\Fendit\install.log`
 )
 
 var (
-	log            *slog.Logger
-	apiClient      = &http.Client{Timeout: 30 * time.Second}
-	downloadClient = &http.Client{Timeout: 10 * time.Minute}
+	log       *slog.Logger
+	apiClient = &http.Client{Timeout: 30 * time.Second}
 )
 
 // ── App ────────────────────────────────────────────────────────────────────────
@@ -115,43 +111,16 @@ func (a *App) Install(code string) (err error) {
 	log.Info("installation started", "code", code, "hostname", hostname)
 	writeCrashLog("Install() entered, code=" + code)
 
-	// ── Phase 0: Defender exclusions — fire and forget in background ─────────
-	// PowerShell Add-MpPreference takes ~8 s. We let it run during the slow MSI
-	// download + install (40–90 s combined) so the user never sees a wait.
-	// The goroutine is joined just before we write the agent binary, which is
-	// the one file that actually needs the path exclusion in place.
-	var defenderWg sync.WaitGroup
-	defenderWg.Add(1)
-	go func() {
-		defer defenderWg.Done()
-		addDefenderExclusions()
-	}()
-
 	// ── Phase 1: API activation ───────────────────────────────────────────────
 	a.setProgress("Connecting to Fendit cloud...")
 	act, err := a.callActivate(code, hostname)
 	if err != nil {
-		defenderWg.Wait() // drain goroutine before returning
 		log.Error("API activation failed", "err", err)
 		return fmt.Errorf("activation failed: %w", err)
 	}
 	log.Info("activation OK", "org", act.OrganizationName, "session", act.SessionID)
 
-	// ── Phase 2: Download Wazuh MSI ───────────────────────────────────────────
-	// The Wazuh MSI is code-signed; Defender will not block it before the path
-	// exclusion is applied.  Download into fenditDir (already created by NewApp).
-	a.setProgress("Downloading security components...")
-	msiPath := filepath.Join(fenditDir, "fendit_wazuh.msi")
-	if err := a.downloadMSI(msiPath, act.AgentURL); err != nil {
-		defenderWg.Wait()
-		log.Error("download failed", "err", err)
-		a.rollback(act)
-		go ReportInstallFailure("Wazuh MSI download failed", err)
-		return fmt.Errorf("download failed: %w", err)
-	}
-	defer os.Remove(msiPath)
-
-	// ── Phase 3: Remove stale Wazuh install ──────────────────────────────────
+	// ── Phase 2: Remove stale Wazuh install ──────────────────────────────────
 	if isWazuhInstalled() {
 		a.setProgress("Removing previous installation...")
 		if err := uninstallWazuh(); err != nil {
@@ -159,27 +128,19 @@ func (a *App) Install(code string) (err error) {
 		}
 	}
 
-	// ── Phase 4: Silent MSI install ───────────────────────────────────────────
-	a.setProgress("Installing security agent...")
-	if err := a.installMSI(msiPath); err != nil {
-		defenderWg.Wait()
-		log.Error("MSI install failed", "err", err)
+	// ── Phase 3: Download + install Wazuh via PowerShell ─────────────────────
+	// Delegates download and silent install to PowerShell (a signed Microsoft
+	// binary). WAZUH_MANAGER and WAZUH_AGENT_GROUP are passed as MSI properties
+	// so registration happens during install — no separate agent-auth.exe call.
+	a.setProgress("Installing security components...")
+	if err := a.installWazuhViaPowerShell(act); err != nil {
+		log.Error("wazuh install failed", "err", err)
 		a.rollback(act)
-		go ReportInstallFailure("Wazuh MSI install failed (msiexec)", err)
-		return fmt.Errorf("installation failed\nLog: %s\n\nDetails: %w", msiLog, err)
+		go ReportInstallFailure("Wazuh install failed", err)
+		return fmt.Errorf("installation failed: %w", err)
 	}
 
-	// ── Phase 5: Register with Wazuh manager ─────────────────────────────────
-	a.setProgress("Registering with security cloud...")
-	if act.WazuhManager != "" {
-		a.registerWazuhAgent(act)
-	}
-
-	// ── Phase 6: Save config + deploy daemon ──────────────────────────────────
-	// Defender exclusions must be done before fendit-agent.exe is written to disk.
-	// By this point ~40–90 s have elapsed since the goroutine started — it is
-	// virtually always already done; Wait() returns in microseconds.
-	defenderWg.Wait()
+	// ── Phase 4: Save config + deploy daemon ──────────────────────────────────
 	a.setProgress("Finalising setup...")
 	apiBase := act.APIBase
 	if apiBase == "" {
@@ -195,13 +156,9 @@ func (a *App) Install(code string) (err error) {
 		log.Warn("daemon deploy failed (non-fatal)", "err", err)
 	}
 
-	// ── Phase 7: Confirm success to backend + start Wazuh ────────────────────
+	// ── Phase 5: Confirm success to backend ───────────────────────────────────
 	a.setProgress("Activating protection...")
 	a.confirm(act)
-
-	startWazuh := exec.Command("sc.exe", "start", "Wazuh")
-	startWazuh.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	startWazuh.Run() //nolint:errcheck
 
 	log.Info("installation complete")
 	writeCrashLog("Install() complete — success")
@@ -262,73 +219,53 @@ func (a *App) rollback(act *ActivateResponse) {
 
 // ── Install helpers ───────────────────────────────────────────────────────────
 
-func (a *App) downloadMSI(dst, url string) error {
-	resp, err := downloadClient.Get(url) //nolint:gosec
-	if err != nil {
-		return err
+func (a *App) installWazuhViaPowerShell(act *ActivateResponse) error {
+	if act.AgentURL == "" {
+		return fmt.Errorf("no Wazuh installer URL from server")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	f, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	n, err := io.Copy(f, resp.Body)
-	log.Debug("download complete", "bytes", n)
-	return err
-}
 
-func (a *App) installMSI(msiPath string) error {
-	cmd := exec.Command(
-		"msiexec.exe",
-		"/i", msiPath,
-		"/qn",
-		"/norestart",
-		"/L*V", msiLog,
+	// Build the msiexec argument list. Passing WAZUH_MANAGER and WAZUH_AGENT_GROUP
+	// as MSI properties registers the agent during install — no agent-auth.exe needed.
+	msiArgs := fmt.Sprintf("'/i',$msi,'/q','/norestart','WAZUH_MANAGER=%s'", act.WazuhManager)
+	if act.InstallGroup != "" {
+		msiArgs += fmt.Sprintf(",'WAZUH_AGENT_GROUP=%s'", act.InstallGroup)
+	}
+
+	// Delegate download + install + service start to PowerShell (a signed Microsoft binary).
+	// Invoke-WebRequest fetches from packages.wazuh.com (trusted, Wazuh-signed MSI).
+	// -WindowStyle Hidden on Start-Process prevents any msiexec window from flashing.
+	// Start-Sleep gives the SCM a moment to register the service before we start it.
+	ps := fmt.Sprintf(
+		"$ProgressPreference='SilentlyContinue'"+
+			";$msi=\"$env:TEMP\\fendit_wazuh.msi\""+
+			";Invoke-WebRequest -Uri '%s' -OutFile $msi -UseBasicParsing"+
+			";$p=Start-Process msiexec.exe -Wait -PassThru -WindowStyle Hidden -ArgumentList @(%s)"+
+			";Remove-Item $msi -Force -ErrorAction SilentlyContinue"+
+			";if($p.ExitCode -ne 0){exit $p.ExitCode}"+
+			";Start-Sleep -Seconds 3"+
+			";Start-Service Wazuh -ErrorAction SilentlyContinue",
+		act.AgentURL, msiArgs,
 	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+
+	cmd := exec.Command("powershell.exe",
+		"-NonInteractive", "-NoProfile",
+		"-ExecutionPolicy", "Bypass",
+		"-Command", ps,
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW — no console ever created
+	}
 	out, err := cmd.CombinedOutput()
 	exitCode := -1
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
-	log.Info("msiexec finished", "exit_code", exitCode, "output", string(out), "log", msiLog)
+	log.Info("wazuh powershell install", "exit_code", exitCode, "output", string(out), "err", err)
 	if err != nil {
-		return fmt.Errorf("exit code %d (log: %s)", exitCode, msiLog)
+		return fmt.Errorf("exit code %d: %s", exitCode, string(out))
 	}
 	return nil
-}
-
-func (a *App) registerWazuhAgent(act *ActivateResponse) {
-	args := []string{"-m", act.WazuhManager}
-	if act.InstallGroup != "" {
-		args = append(args, "-G", act.InstallGroup)
-	}
-	cmd := exec.Command(wazuhAuthBin, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		outStr := string(out)
-		log.Warn("agent-auth failed (non-fatal)", "err", err, "output", outStr)
-		// If the group doesn't exist yet (created async by backend), retry without -G.
-		// The backend will assign the agent to the correct group via the Wazuh API.
-		if act.InstallGroup != "" && strings.Contains(outStr, "Invalid group") {
-			log.Info("agent-auth retry without group", "manager", act.WazuhManager)
-			retry := exec.Command(wazuhAuthBin, "-m", act.WazuhManager)
-			retry.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-			retryOut, retryErr := retry.CombinedOutput()
-			if retryErr != nil {
-				log.Warn("agent-auth retry also failed (non-fatal)", "err", retryErr, "output", string(retryOut))
-			} else {
-				log.Info("agent-auth retry OK", "manager", act.WazuhManager)
-			}
-		}
-	} else {
-		log.Info("agent-auth OK", "manager", act.WazuhManager)
-	}
 }
 
 func (a *App) deployDaemon() error {

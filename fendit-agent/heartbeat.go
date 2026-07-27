@@ -7,8 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -16,9 +20,11 @@ const (
 	heartbeatInterval  = 5 * time.Minute
 	heartbeatTimeout   = 10 * time.Second
 	crashReportTimeout = 5 * time.Second
+	yaraDownloadTimeout = 2 * time.Minute
 
 	pathHeartbeat = "/api/v1/telemetry/heartbeat"
 	pathCrash     = "/api/v1/telemetry/crash"
+	pathYaraRules = "/api/control/v1/rules/yara"
 )
 
 // heartbeatPayload is the body of POST /api/v1/telemetry/heartbeat.
@@ -38,10 +44,12 @@ type heartbeatPayload struct {
 }
 
 // heartbeatResponse is the parsed body of a successful heartbeat POST.
-// Guardian returns an update signal when the agent or Wazuh is out of date.
+// Guardian returns an update signal when the agent or Wazuh is out of date,
+// and a YaraHash so the agent can skip the download when rules are current.
 type heartbeatResponse struct {
 	Status             string   `json:"status"`
 	UpdateAvailable    bool     `json:"update_available"`
+	YaraHash           string   `json:"yara_hash"`
 	Components         []string `json:"components"`
 	AgentVersionLatest string   `json:"agent_version_latest"`
 	WazuhVersionLatest string   `json:"wazuh_version_latest"`
@@ -126,11 +134,16 @@ func sendHeartbeat(cfg *Config, agentID string) error {
 		return fmt.Errorf("server error %d", resp.StatusCode)
 	}
 
-	// Parse the update signal embedded in the heartbeat response.
-	// Any parse error is swallowed — a missed update notification is not fatal.
+	// Parse the heartbeat response. Any parse error is swallowed — a missed
+	// update notification or YARA sync is not fatal.
 	var hbResp heartbeatResponse
-	if jsonErr := json.NewDecoder(resp.Body).Decode(&hbResp); jsonErr == nil && hbResp.UpdateAvailable {
-		applyUpdateSignal(&hbResp)
+	if jsonErr := json.NewDecoder(resp.Body).Decode(&hbResp); jsonErr == nil {
+		if hbResp.UpdateAvailable {
+			applyUpdateSignal(&hbResp)
+		}
+		if hbResp.YaraHash != "" {
+			go maybeUpdateYara(cfg, hbResp.YaraHash)
+		}
 	}
 
 	return nil
@@ -182,6 +195,92 @@ func applyUpdateSignal(resp *heartbeatResponse) {
 	} else {
 		logger.Info().Strs("components", resp.Components).Msg("heartbeat: update available — state written")
 	}
+}
+
+// ── YARA rule sync ────────────────────────────────────────────────────────────
+
+var yaraDownloadMu sync.Mutex
+
+// maybeUpdateYara compares the server-reported SHA-256 of mcp_rules.yarc with
+// the local copy and downloads a fresh ruleset only when they differ.
+// Runs in a goroutine — never blocks the heartbeat response path.
+func maybeUpdateYara(cfg *Config, serverHash string) {
+	if localYaraHash() == serverHash {
+		return
+	}
+	if !yaraDownloadMu.TryLock() {
+		return // download already in progress from a concurrent heartbeat
+	}
+	defer yaraDownloadMu.Unlock()
+	// Re-check after acquiring the lock in case a concurrent goroutine just finished.
+	if localYaraHash() == serverHash {
+		return
+	}
+	logger.Info().Str("hash", serverHash[:8]).Msg("yara: rules changed — downloading")
+	if err := downloadYaraRules(cfg, serverHash); err != nil {
+		logger.Warn().Err(err).Msg("yara: download failed")
+	} else {
+		logger.Info().Msg("yara: rules updated")
+	}
+}
+
+// localYaraHash returns the SHA-256 hex of the local mcp_rules.yarc, or ""
+// when the file does not exist yet.
+func localYaraHash() string {
+	data, err := os.ReadFile(yaraRulesLocalPath())
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// downloadYaraRules fetches the compiled ruleset from Guardian, verifies the
+// SHA-256, and atomically replaces the local copy.
+func downloadYaraRules(cfg *Config, expectedHash string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), yaraDownloadTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.endpoint(pathYaraRules), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.ReflexToken)
+	req.Header.Set("User-Agent", "Fendit-Agent/"+version)
+
+	resp, err := agentHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read body: %w", err)
+	}
+
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != expectedHash {
+		return fmt.Errorf("hash mismatch: got %s want %s", got[:8], expectedHash[:8])
+	}
+
+	dst := yaraRulesLocalPath()
+	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp) //nolint:errcheck
+		return fmt.Errorf("atomic rename: %w", err)
+	}
+	return nil
 }
 
 // sendCrashReport is called from handlePanic. It has a hard 5-second deadline

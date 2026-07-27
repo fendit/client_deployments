@@ -340,21 +340,24 @@ func handleYaraCheck(ctx context.Context, cfg *Config, filePath string) {
 	))
 }
 
-// yaraRulesPath returns the path to the YARA-X rules file (preferring compiled .yarc).
-// yr auto-detects compiled vs source format — no flag needed.
-func yaraRulesPath() string {
-	var base string
+// yaraRulesLocalPath returns the canonical local path for the downloaded compiled
+// YARA rules. Guardian distributes .yarc via GET /api/control/v1/rules/yara;
+// the heartbeat handler writes it here on hash change.
+func yaraRulesLocalPath() string {
 	switch runtime.GOOS {
 	case "windows":
-		base = `C:\Program Files (x86)\ossec-agent\shared\default\mcp_rules`
+		return `C:\ProgramData\Fendit\mcp_rules.yarc`
 	default:
-		base = "/Library/Ossec/etc/shared/default/mcp_rules"
+		return "/Library/Fendit/mcp_rules.yarc"
 	}
-	if _, err := os.Stat(base + ".yarc"); err == nil {
-		return base + ".yarc"
-	}
-	if _, err := os.Stat(base + ".yar"); err == nil {
-		return base + ".yar"
+}
+
+// yaraRulesPath returns the local path only when the file actually exists.
+// Returns "" when no rules have been downloaded yet.
+func yaraRulesPath() string {
+	p := yaraRulesLocalPath()
+	if _, err := os.Stat(p); err == nil {
+		return p
 	}
 	return ""
 }
