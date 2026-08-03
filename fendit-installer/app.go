@@ -226,7 +226,7 @@ func (a *App) installWazuhViaPowerShell(act *ActivateResponse) error {
 
 	// Build the msiexec argument list. Passing WAZUH_MANAGER and WAZUH_AGENT_GROUP
 	// as MSI properties registers the agent during install — no agent-auth.exe needed.
-	msiArgs := fmt.Sprintf("'/i',$msi,'/q','/norestart','WAZUH_MANAGER=%s'", act.WazuhManager)
+	msiArgs := fmt.Sprintf("'/i',$msi,'/qn','/norestart','WAZUH_MANAGER=%s'", act.WazuhManager)
 	if act.InstallGroup != "" {
 		msiArgs += fmt.Sprintf(",'WAZUH_AGENT_GROUP=%s'", act.InstallGroup)
 	}
